@@ -1,13 +1,12 @@
 import os
 import streamlit as st
 import PyPDF2
-from langchain.llms import OpenAI
+from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
 from langchain.document_loaders import PyPDFLoader, CSVLoader, UnstructuredExcelLoader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 import tiktoken
-import openai
+from openai import OpenAI
 
 class BusinessDocumentChatbot:
     def __init__(self, openai_api_key):
@@ -22,7 +21,8 @@ class BusinessDocumentChatbot:
 
         # Initialize OpenAI components
         self.embeddings = OpenAIEmbeddings()
-        self.llm = OpenAI(temperature=0.3, max_tokens=100)
+        self.llm = LangchainOpenAI(temperature=0.3, max_tokens=100)
+        self.client = OpenAI(api_key=openai_api_key)
 
         # Store for loaded documents
         self.loaded_documents = []
@@ -96,7 +96,7 @@ class BusinessDocumentChatbot:
         Returns:
             list: Filtered documents within token limit
         """
-        encoding = tiktoken.encoding_for_model("text-davinci-003")
+        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
         question_tokens = len(encoding.encode(question))
         doc_tokens = [len(encoding.encode(doc.page_content)) for doc in docs]
 
@@ -158,20 +158,17 @@ class BusinessDocumentChatbot:
                 "content": f"Relevant information from documents:\n{document_context}"
             })
 
-        # Append the user's question to the chat history
-
         # Combine chat history with the new context
-        full_conversation = context + st.session_state.chat_history
+        full_conversation = context + st.session_state.chat_history + [{"role": "user", "content": question}]
 
         # Generate response using OpenAI's ChatCompletion API
-        openai.api_key = self.openai_api_key
-        response = openai.ChatCompletion.create(
+        response = self.client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=full_conversation
         )
 
         # Extract the assistant's reply
-        answer = response["choices"][0]["message"]["content"]
+        answer = response.choices[0].message.content
 
         return answer
 
