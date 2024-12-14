@@ -1,5 +1,7 @@
 import os
 import streamlit as st
+import sqlite3
+import requests
 import PyPDF2
 from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
 from langchain.document_loaders import PyPDFLoader, CSVLoader, UnstructuredExcelLoader
@@ -8,13 +10,14 @@ from langchain.vectorstores import FAISS
 import tiktoken
 from openai import OpenAI
 
-class BusinessDocumentChatbot:
-    def __init__(self, openai_api_key):
+class IntegratedDocumentChatbot:
+    def __init__(self, openai_api_key, db_path="onedrive_files.db"):
         """
-        Initialize the chatbot with OpenAI API key
+        Initialize the chatbot with OpenAI API key and database connection
 
         Args:
             openai_api_key (str): OpenAI API key for authentication
+            db_path (str): Path to the SQLite database
         """
         self.openai_api_key = openai_api_key
         os.environ["OPENAI_API_KEY"] = openai_api_key
@@ -24,12 +27,18 @@ class BusinessDocumentChatbot:
         self.llm = LangchainOpenAI(temperature=0.3, max_tokens=100)
         self.client = OpenAI(api_key=openai_api_key)
 
-        # Store for loaded documents
+        # Database connection and document management
+        self.db_path = db_path
         self.loaded_documents = []
+        self.manually_uploaded_documents = []
         
+        # Vector store management
+        self.vector_store = None
+        self.last_document_count = 0
+
     def load_pdf(self, pdf_file):
         """
-        Load PDF file and split into chunks
+        Load PDF file and split into chunks for manual upload
 
         Args:
             pdf_file (file): PDF file to load
@@ -41,11 +50,13 @@ class BusinessDocumentChatbot:
         documents = loader.load()
         text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         texts = text_splitter.split_documents(documents)
-        self.loaded_documents.extend(texts)
+        
+        # Add to manually uploaded documents
+        self.manually_uploaded_documents.extend(texts)
 
     def load_csv(self, csv_file):
         """
-        Load CSV file and convert to text chunks
+        Load CSV file for manual upload
 
         Args:
             csv_file (file): CSV file to load
@@ -55,11 +66,13 @@ class BusinessDocumentChatbot:
 
         loader = CSVLoader(file_path="temp.csv")
         documents = loader.load()
-        self.loaded_documents.extend(documents)
+        
+        # Add to manually uploaded documents
+        self.manually_uploaded_documents.extend(documents)
 
     def load_excel(self, excel_file):
         """
-        Load Excel file and convert to text chunks
+        Load Excel file for manual upload
 
         Args:
             excel_file (file): Excel file to load
@@ -71,19 +84,63 @@ class BusinessDocumentChatbot:
         documents = loader.load()
         text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         texts = text_splitter.split_documents(documents)
-        self.loaded_documents.extend(texts)
+        
+        # Add to manually uploaded documents
+        self.manually_uploaded_documents.extend(texts)
 
-    def create_vector_store(self):
+    def fetch_all_documents(self):
         """
-        Create vector store from loaded documents
-
-        Returns:
-            FAISS: Vector store for semantic search
+        Combine OneDrive and manually uploaded documents
         """
-        if not self.loaded_documents:
-            raise ValueError("No documents have been loaded")
+        # Fetch database documents
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, content FROM files")
+        files = cursor.fetchall()
+        conn.close()
 
-        return FAISS.from_documents(self.loaded_documents, self.embeddings)
+        # Clear previous loaded documents
+        self.loaded_documents = []
+
+        # Add OneDrive files
+        for name, content in files:
+            doc = type('Document', (), {
+                'page_content': f"File: {name}\nContent: {content}",
+                'metadata': {'source': name}
+            })
+            self.loaded_documents.append(doc)
+
+        # Add manually uploaded documents
+        self.loaded_documents.extend(self.manually_uploaded_documents)
+
+    def update_vector_store_if_needed(self):
+        """
+        Efficiently update vector store only when documents change
+        """
+        # Fetch current document count
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM files")
+        current_doc_count = cursor.fetchone()[0]
+        conn.close()
+
+        # Check if documents have changed or first initialization
+        if (self.vector_store is None or 
+            current_doc_count != self.last_document_count or 
+            len(self.manually_uploaded_documents) > 0):
+            
+            # Fetch all documents
+            self.fetch_all_documents()
+            
+            # Recreate vector store
+            if self.loaded_documents:
+                self.vector_store = FAISS.from_documents(
+                    self.loaded_documents, 
+                    self.embeddings
+                )
+                
+                # Update tracking
+                self.last_document_count = current_doc_count
 
     def validate_token_limit(self, docs, question):
         """
@@ -112,19 +169,9 @@ class BusinessDocumentChatbot:
 
         return valid_docs
 
-    def summarize_documents(self):
-        """
-        Summarize loaded documents to reduce size.
-        """
-        summarized_texts = []
-        for doc in self.loaded_documents:
-            summary = self.llm(f"Summarize this: {doc.page_content}")
-            summarized_texts.append(summary)
-        self.loaded_documents = summarized_texts
-
     def answer_question(self, question):
         """
-        Answer a question based on loaded documents and chat history using OpenAI's ChatCompletion API.
+        Answer a question based on loaded documents using OpenAI's ChatCompletion API.
 
         Args:
             question (str): User's question.
@@ -134,17 +181,17 @@ class BusinessDocumentChatbot:
         """
         # Ensure the chat history exists in session state
         if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = [{"role": "system", "content": "You are a helpful assistant."}]
+            st.session_state.chat_history = [{"role": "system", "content": "You are a helpful assistant analyzing documents."}]
+
+        # Update vector store efficiently
+        self.update_vector_store_if_needed()
 
         # Initialize context for the OpenAI ChatCompletion API
         context = []
 
-        if self.loaded_documents:
-            # Create vector store from loaded documents
-            vector_store = self.create_vector_store()
-
+        if self.vector_store:
             # Perform similarity search to find relevant chunks
-            docs = vector_store.similarity_search(question, k=5)
+            docs = self.vector_store.similarity_search(question, k=5)
 
             # Validate token limits for retrieved documents
             docs = self.validate_token_limit(docs, question)
@@ -172,44 +219,37 @@ class BusinessDocumentChatbot:
 
         return answer
 
-
 def main():
-    st.title("Rebels N Misfits Bot🤖")
+    st.title("Integrated Document Chatbot 📁🤖")
 
     # Sidebar for API Key and File Upload
     st.sidebar.header("Configuration")
     openai_api_key = "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"  # Replace with your actual API key
 
-    # File upload sections
-    uploaded_pdf = st.sidebar.file_uploader("Upload PDF", type="pdf")
-    uploaded_csv = st.sidebar.file_uploader("Upload CSV", type="csv")
-    uploaded_excel = st.sidebar.file_uploader("Upload Excel", type="xlsx")
-
     # Initialize chatbot
     if openai_api_key:
-        chatbot = BusinessDocumentChatbot(openai_api_key)
+        chatbot = IntegratedDocumentChatbot(openai_api_key)
 
-        # Load files if uploaded
+        # File upload sections
+        uploaded_pdf = st.sidebar.file_uploader("Upload Additional PDF", type="pdf")
+        uploaded_csv = st.sidebar.file_uploader("Upload Additional CSV", type="csv")
+        uploaded_excel = st.sidebar.file_uploader("Upload Additional Excel", type="xlsx")
+
+        # Load manually uploaded files
         if uploaded_pdf:
             chatbot.load_pdf(uploaded_pdf)
-            st.sidebar.success("PDF Loaded Successfully")
+            st.sidebar.success("PDF Uploaded Successfully")
 
         if uploaded_csv:
             chatbot.load_csv(uploaded_csv)
-            st.sidebar.success("CSV Loaded Successfully")
+            st.sidebar.success("CSV Uploaded Successfully")
 
         if uploaded_excel:
             chatbot.load_excel(uploaded_excel)
-            st.sidebar.success("Excel Loaded Successfully")
-
-        # Summarize documents to reduce size
-        if st.sidebar.button("Summarize Documents"):
-            with st.spinner("Summarizing documents..."):
-                chatbot.summarize_documents()
-                st.sidebar.success("Documents Summarized Successfully")
+            st.sidebar.success("Excel Uploaded Successfully")
 
         # Chat interface
-        st.header("Ask a Question")
+        st.header("Ask a Question About Your Documents")
         
         # Initialize chat history if it doesn't exist
         if 'chat_history' not in st.session_state:
