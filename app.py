@@ -54,6 +54,17 @@ class IntegratedDocumentChatbot:
         # Add to manually uploaded documents
         self.manually_uploaded_documents.extend(texts)
 
+        # Save to database for persistence
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for i, doc in enumerate(texts):
+            cursor.execute("""
+                INSERT OR REPLACE INTO files (id, name, content, last_modified)
+                VALUES (?, ?, ?, ?)
+            """, (f"manual_pdf_{i}", "Uploaded PDF", doc.page_content, None))
+        conn.commit()
+        conn.close()
+
     def load_csv(self, csv_file):
         """
         Load CSV file for manual upload
@@ -69,6 +80,17 @@ class IntegratedDocumentChatbot:
         
         # Add to manually uploaded documents
         self.manually_uploaded_documents.extend(documents)
+
+        # Save to database for persistence
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for i, doc in enumerate(documents):
+            cursor.execute("""
+                INSERT OR REPLACE INTO files (id, name, content, last_modified)
+                VALUES (?, ?, ?, ?)
+            """, (f"manual_csv_{i}", "Uploaded CSV", doc.page_content, None))
+        conn.commit()
+        conn.close()
 
     def load_excel(self, excel_file):
         """
@@ -87,6 +109,17 @@ class IntegratedDocumentChatbot:
         
         # Add to manually uploaded documents
         self.manually_uploaded_documents.extend(texts)
+
+        # Save to database for persistence
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for i, doc in enumerate(texts):
+            cursor.execute("""
+                INSERT OR REPLACE INTO files (id, name, content, last_modified)
+                VALUES (?, ?, ?, ?)
+            """, (f"manual_excel_{i}", "Uploaded Excel", doc.page_content, None))
+        conn.commit()
+        conn.close()
 
     def fetch_all_documents(self):
         """
@@ -134,6 +167,10 @@ class IntegratedDocumentChatbot:
             
             # Recreate vector store
             if self.loaded_documents:
+                # Add a unique ID to each document
+                for i, doc in enumerate(self.loaded_documents):
+                    doc.id = f"doc_{i}"
+                
                 self.vector_store = FAISS.from_documents(
                     self.loaded_documents, 
                     self.embeddings
@@ -141,7 +178,7 @@ class IntegratedDocumentChatbot:
                 
                 # Update tracking
                 self.last_document_count = current_doc_count
-
+                
     def validate_token_limit(self, docs, question):
         """
         Validate if the token limit is exceeded.
@@ -220,7 +257,7 @@ class IntegratedDocumentChatbot:
         return answer
 
 def main():
-    st.title("Integrated Document Chatbot 📁🤖")
+    st.title("Rebels N Misfits Chatbot 📁🤖")
 
     # Sidebar for API Key and File Upload
     st.sidebar.header("Configuration")
@@ -235,18 +272,20 @@ def main():
         uploaded_csv = st.sidebar.file_uploader("Upload Additional CSV", type="csv")
         uploaded_excel = st.sidebar.file_uploader("Upload Additional Excel", type="xlsx")
 
-        # Load manually uploaded files
         if uploaded_pdf:
             chatbot.load_pdf(uploaded_pdf)
-            st.sidebar.success("PDF Uploaded Successfully")
+            chatbot.update_vector_store_if_needed()  # Update vector store immediately
+            st.sidebar.success("PDF Uploaded Successfully and Vector Store Updated")
 
         if uploaded_csv:
             chatbot.load_csv(uploaded_csv)
-            st.sidebar.success("CSV Uploaded Successfully")
+            chatbot.update_vector_store_if_needed()  # Update vector store immediately
+            st.sidebar.success("CSV Uploaded Successfully and Vector Store Updated")
 
         if uploaded_excel:
             chatbot.load_excel(uploaded_excel)
-            st.sidebar.success("Excel Uploaded Successfully")
+            chatbot.update_vector_store_if_needed()  # Update vector store immediately
+            st.sidebar.success("Excel Uploaded Successfully and Vector Store Updated")
 
         # Chat interface
         st.header("Ask a Question About Your Documents")

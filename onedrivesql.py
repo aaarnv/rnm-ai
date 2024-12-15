@@ -1,10 +1,12 @@
 import os
 import requests
 import sqlite3
+import mimetypes
 from flask import Flask, request, redirect, session
 from msal import ConfidentialClientApplication
-import threading
-import time
+from PyPDF2 import PdfReader
+import pandas as pd
+import io
 
 # Flask app setup
 app = Flask(__name__)
@@ -26,7 +28,7 @@ msal_app = ConfidentialClientApplication(
 # Initialize database connection
 def init_db():
     conn = sqlite3.connect("onedrive_files.db")
-    cursor = conn.cursor() 
+    cursor = conn.cursor()
     # Create a table to store file metadata
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
@@ -81,17 +83,16 @@ def dashboard():
 
     return f"""
     <h1>Welcome {user_info.get("displayName", "User")}</h1>
-    <a href="/list_files">List OneDrive Files</a><br>
     <a href="/sync_files">Sync OneDrive Files to Database</a><br>
     <a href="/search_files">Search Files</a>
     """
 
-# Function: Sync files from OneDrive to database
+# Route: Sync files from OneDrive to database
+@app.route("/sync_files")
 def sync_files():
     access_token = session.get("access_token")
     if not access_token:
-        print("Access token not available. Login required.")
-        return
+        return redirect("/login")
 
     response = requests.get(f"{GRAPH_API_ENDPOINT}/me/drive/root/children", headers={"Authorization": f"Bearer {access_token}"})
     files = response.json().get("value", [])
@@ -101,31 +102,40 @@ def sync_files():
 
     for file in files:
         file_id = file["id"]
+        file_name = file["name"]
         file_content_response = requests.get(
             f"{GRAPH_API_ENDPOINT}/me/drive/items/{file_id}/content",
             headers={"Authorization": f"Bearer {access_token}"}
         )
 
-        file_content = file_content_response.text if file_content_response.status_code == 200 else None
+        if file_content_response.status_code == 200:
+            # Detect file type
+            mime_type, _ = mimetypes.guess_type(file_name)
+            file_content = None
 
-        cursor.execute("""
-            INSERT OR REPLACE INTO files (id, name, content, last_modified)
-            VALUES (?, ?, ?, ?)
-        """, (file_id, file["name"], file_content, file.get("lastModifiedDateTime")))
+            # Handle PDFs
+            if mime_type == "application/pdf":
+                pdf_reader = PdfReader(io.BytesIO(file_content_response.content))
+                file_content = "\n".join(page.extract_text() for page in pdf_reader.pages)
+
+            # Handle Excel files
+            elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
+                excel_data = pd.read_excel(io.BytesIO(file_content_response.content))
+                file_content = excel_data.to_csv(index=False)
+
+            # Handle other file types as plain text
+            else:
+                file_content = file_content_response.text
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO files (id, name, content, last_modified)
+                VALUES (?, ?, ?, ?)
+            """, (file_id, file_name, file_content, file.get("lastModifiedDateTime")))
 
     conn.commit()
     conn.close()
-    print(f"Synced {len(files)} files to database!")
 
-# Background thread to automate sync process
-def automated_sync(interval=300):
-    while True:
-        print("Starting automated sync...")
-        try:
-            sync_files()
-        except Exception as e:
-            print(f"Error during sync: {e}")
-        time.sleep(interval)
+    return f"<h1>Synced {len(files)} files to database!</h1><a href='/dashboard'>Back to Dashboard</a>"
 
 # Route: Search files in database
 @app.route("/search_files", methods=["GET", "POST"])
@@ -158,30 +168,5 @@ def search_files():
 
     return f"<h1>Search Results</h1>{result_list}<a href='/dashboard'>Back to Dashboard</a>"
 
-
-@app.route("/query", methods=["POST"])
-def query():
-    data = request.json
-    sql_query = data.get("sql_query")  # SQL query sent from the Assistant
-    if not sql_query:
-        return {"error": "SQL query is required"}, 400
-
-    try:
-        # Execute the SQL query on the SQLite database
-        conn = sqlite3.connect("onedrive_files.db")
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        results = cursor.fetchall()
-        column_names = [description[0] for description in cursor.description]  # Get column names
-        conn.close()
-
-        # Return results in a structured format (e.g., CSV-like or JSON array)
-        return {
-            "results": [dict(zip(column_names, row)) for row in results]
-        }, 200
-    except sqlite3.Error as e:
-        return {"error": f"SQL execution failed: {str(e)}"}, 500
-
 if __name__ == "__main__":
-    threading.Thread(target=automated_sync, daemon=True).start()
     app.run(debug=True, host='0.0.0.0', port=5001)
