@@ -3,6 +3,7 @@ import streamlit as st
 import sqlite3
 import requests
 import PyPDF2
+import pandas as pd
 from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
 from langchain.document_loaders import PyPDFLoader, CSVLoader, UnstructuredExcelLoader
 from langchain.text_splitter import CharacterTextSplitter
@@ -94,7 +95,7 @@ class IntegratedDocumentChatbot:
 
     def load_excel(self, excel_file):
         """
-        Load Excel file for manual upload
+        Load Excel file with multiple sheets for manual upload
 
         Args:
             excel_file (file): Excel file to load
@@ -102,22 +103,31 @@ class IntegratedDocumentChatbot:
         with open("temp.xlsx", "wb") as f:
             f.write(excel_file.getvalue())
 
-        loader = UnstructuredExcelLoader("temp.xlsx")
-        documents = loader.load()
-        text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-        texts = text_splitter.split_documents(documents)
-        
+        # Load the Excel file with multiple sheets
+        excel_data = pd.read_excel("temp.xlsx", sheet_name=None)
+
+        # Extract content from each sheet
+        all_documents = []
+        for sheet_name, df in excel_data.items():
+            # Convert each sheet to text
+            text_content = df.to_string(index=False)  # Flatten the DataFrame to a string
+            doc = type('Document', (), {
+                'page_content': text_content,
+                'metadata': {'source': f"Excel Sheet: {sheet_name}"}
+            })
+            all_documents.append(doc)
+
         # Add to manually uploaded documents
-        self.manually_uploaded_documents.extend(texts)
+        self.manually_uploaded_documents.extend(all_documents)
 
         # Save to database for persistence
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        for i, doc in enumerate(texts):
+        for i, doc in enumerate(all_documents):
             cursor.execute("""
                 INSERT OR REPLACE INTO files (id, name, content, last_modified)
                 VALUES (?, ?, ?, ?)
-            """, (f"manual_excel_{i}", "Uploaded Excel", doc.page_content, None))
+            """, (f"manual_excel_{i}", f"Uploaded Excel - {doc.metadata['source']}", doc.page_content, None))
         conn.commit()
         conn.close()
 
@@ -298,6 +308,7 @@ def main():
         for item in st.session_state.chat_history:
             st.markdown(f"**{item['role'].capitalize()}:** {item['content']}")
 
+        
         user_question = st.text_input("Enter your question about the documents")
 
         if user_question:
