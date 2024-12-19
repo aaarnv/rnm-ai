@@ -10,9 +10,9 @@ import pandas as pd
 import tiktoken
 from openai import OpenAI
 from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
-from langchain.document_loaders import PyPDFLoader, CSVLoader, UnstructuredExcelLoader
+from langchain_community.document_loaders import CSVLoader, PyPDFLoader, UnstructuredExcelLoader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 
 class IntegratedDocumentChatbot:
     def __init__(self, openai_api_key, db_path="onedrive_files.db"):
@@ -93,24 +93,38 @@ class IntegratedDocumentChatbot:
         with open("temp.xlsx", "wb") as f:
             f.write(excel_file.read())
 
-        loader = UnstructuredExcelLoader("temp.xlsx")
-        documents = loader.load()
-        text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-        texts = text_splitter.split_documents(documents)
-        
-        # Add to manually uploaded documents
-        self.manually_uploaded_documents.extend(texts)
+        try:
+            excel_file = pd.ExcelFile("temp.xlsx")
+            all_sheets_content = []
+            
+            for sheet_name in excel_file.sheet_names:
+                df = excel_file.parse(sheet_name)
+                sheet_text = f"Sheet: {sheet_name}\n{df.to_string()}"
+                
+                text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+                sheet_docs = text_splitter.create_documents([sheet_text])
+                
+                all_sheets_content.extend(sheet_docs)
+            
+            # Add to manually uploaded documents
+            self.manually_uploaded_documents.extend(all_sheets_content)
 
-        # Save to database for persistence
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        for i, doc in enumerate(texts):
-            cursor.execute("""
-                INSERT OR REPLACE INTO files (id, name, content, last_modified)
-                VALUES (?, ?, ?, ?)
-            """, (f"manual_excel_{i}", "Uploaded Excel", doc.page_content, None))
-        conn.commit()
-        conn.close()
+            # Save to database for persistence
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            for i, doc in enumerate(all_sheets_content):
+                cursor.execute("""
+                    INSERT OR REPLACE INTO files (id, name, content, last_modified)
+                    VALUES (?, ?, ?, ?)
+                """, (f"manual_excel_{i}", f"Uploaded Excel - {doc.metadata.get('source', 'Unknown')}", doc.page_content, None))
+            
+            print(f"Loaded {len(all_sheets_content)} chunks from Excel file.")
+
+            conn.commit()
+            conn.close()
+
+        except Exception as e:
+            print(f"Error processing Excel file: {e}")
 
     def fetch_all_documents(self):
         """
@@ -133,6 +147,7 @@ class IntegratedDocumentChatbot:
                 'metadata': {'source': name}
             })
             self.loaded_documents.append(doc)
+            print(f"Fetched document: {name}")
 
         # Add manually uploaded documents
         self.loaded_documents.extend(self.manually_uploaded_documents)
@@ -169,7 +184,8 @@ class IntegratedDocumentChatbot:
                 
                 # Update tracking
                 self.last_document_count = current_doc_count
-                
+                print(f"Vector store updated with {len(self.loaded_documents)} documents.")
+
     def validate_token_limit(self, docs, question):
         """
         Validate if the token limit is exceeded.
@@ -178,6 +194,7 @@ class IntegratedDocumentChatbot:
         question_tokens = len(encoding.encode(question))
         doc_tokens = [len(encoding.encode(doc.page_content)) for doc in docs]
 
+        print(f"Document tokens: {[len(encoding.encode(doc.page_content)) for doc in docs]}")
         total_tokens = question_tokens
         valid_docs = []
 
@@ -186,6 +203,7 @@ class IntegratedDocumentChatbot:
                 total_tokens += tokens
                 valid_docs.append(doc)
             else:
+                print("Warning: File too large for processing.")
                 break
 
         return valid_docs
@@ -235,8 +253,8 @@ app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 # App configuration (replace these with your own values)
-CLIENT_ID = "35ce19d8-f515-4da5-9b49-142d8b751de6"
-CLIENT_SECRET = "pZd8Q~zyvfjhFu0t5QdFIgZSOYYNtnrCYmSpIaWn"
+CLIENT_ID = "8c3d5655-72bd-4c68-83a8-5f3ed8e5dd64"
+CLIENT_SECRET = "Jmp8Q~s.Cm5nKx7gOVLnUL~Q9SgyF_c~PekQ8aaV"
 AUTHORITY = "https://login.microsoftonline.com/common"
 REDIRECT_URI = "http://localhost:5001/getAToken"
 SCOPES = ["Files.ReadWrite.All", "User.Read"]
@@ -339,8 +357,20 @@ def sync_files():
 
             # Handle Excel files
             elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-                excel_data = pd.read_excel(io.BytesIO(file_content_response.content))
-                file_content = excel_data.to_csv(index=False)
+                try:
+                    # Read all sheets and combine them
+                    excel_file = pd.ExcelFile(io.BytesIO(file_content_response.content))
+                    all_sheets_content = []
+                    
+                    for sheet_name in excel_file.sheet_names:
+                        df = excel_file.parse(sheet_name)
+                        all_sheets_content.append(f"Sheet: {sheet_name}\n")
+                        all_sheets_content.append(df.to_string())
+                        all_sheets_content.append("\n\n")
+                    
+                    file_content = "\n".join(all_sheets_content)
+                except Exception as e:
+                    file_content = f"Error processing Excel file: {str(e)}"
 
             # Handle other file types as plain text
             else:
@@ -452,7 +482,64 @@ def clear_chat():
     session['chat_history'] = []
     return redirect("/chatbot")
 
-# Create necessary HTML templates
+@app.route("/reset_database")
+def reset_database():
+    """
+    Reset the OneDrive files database by:
+    1. Closing any existing connections
+    2. Deleting the existing database file
+    3. Reinitializing the database
+    """
+
+    # Path to the database file
+    db_path = "onedrive_files.db"
+
+    try:
+        # Delete the existing database file if it exists
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+        # Reinitialize the database
+        init_db()
+
+        # Clear manually uploaded documents in the chatbot
+        if 'chatbot' in globals():
+            chatbot.manually_uploaded_documents = []
+            chatbot.loaded_documents = []
+            chatbot.vector_store = None
+            chatbot.last_document_count = 0
+
+        # Clear session data if needed
+        session.clear()
+
+        return "Database reset successfully. <a href='/dashboard'>Return to Dashboard</a>"
+    except Exception as e:
+        return f"Error resetting database: {str(e)}"
+
+@app.route("/list_files")
+def list_files():
+    """
+    Retrieve and display all files stored in the database
+    """
+    show_content = request.args.get('show_content', 'false')
+    
+    conn = sqlite3.connect("onedrive_files.db")
+    cursor = conn.cursor()
+    
+    if show_content == 'true':
+        # Retrieve all files with full content
+        cursor.execute("SELECT id, name, content, last_modified FROM files")
+    else:
+        # Retrieve files with just metadata
+        cursor.execute("SELECT id, name, length(content) as content_length, last_modified FROM files")
+    
+    files = cursor.fetchall()
+    
+    conn.close()
+
+    return render_template("list_files.html", files=files, show_content=show_content)
+
+# Update create_templates() to add list_files.html and update dashboard
 def create_templates():
     os.makedirs("templates", exist_ok=True)
 
@@ -491,14 +578,20 @@ def create_templates():
     <div class="container mt-5">
         <h1>Welcome, {{ user_name }}!</h1>
         <div class="row">
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <a href="/sync_files" class="btn btn-primary w-100">Sync OneDrive Files</a>
             </div>
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <a href="/search_files" class="btn btn-secondary w-100">Search Files</a>
             </div>
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <a href="/chatbot" class="btn btn-success w-100">Rebels N Misfits Chatbot</a>
+            </div>
+            <div class="col-md-3 mb-3">
+                <a href="/reset_database" class="btn btn-danger w-100" onclick="return confirm('Are you sure you want to reset the database? This will delete all synced and uploaded files.');">Reset Database</a>
+            </div>
+            <div class="col-md-3 mb-3">
+                <a href="/list_files" class="btn btn-info w-100">View Stored Files</a>
             </div>
         </div>
     </div>
@@ -506,6 +599,75 @@ def create_templates():
 </html>
         ''')
 
+    # list_files.html
+    with open("templates/list_files.html", "w") as f:
+        f.write('''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Stored Files</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        pre {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1>Stored Files</h1>
+        {% if show_content == 'true' %}
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>File ID</th>
+                        <th>File Name</th>
+                        <th>Content</th>
+                        <th>Last Modified</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for file in files %}
+                    <tr>
+                        <td>{{ file[0] }}</td>
+                        <td>{{ file[1] }}</td>
+                        <td><pre>{{ file[2][:500] }}{% if file[2]|length > 500 %}... (truncated){% endif %}</pre></td>
+                        <td>{{ file[3] or 'N/A' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <a href="/list_files" class="btn btn-secondary">Hide Content</a>
+        {% else %}
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>File ID</th>
+                        <th>File Name</th>
+                        <th>Content Length</th>
+                        <th>Last Modified</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for file in files %}
+                    <tr>
+                        <td>{{ file[0] }}</td>
+                        <td>{{ file[1] }}</td>
+                        <td>{{ file[2] }} characters</td>
+                        <td>{{ file[3] or 'N/A' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <a href="/list_files?show_content=true" class="btn btn-primary">Show File Contents</a>
+        {% endif %}
+        <a href="/dashboard" class="btn btn-secondary mt-2">Back to Dashboard</a>
+    </div>
+</body>
+</html>
+        ''')
     # sync_complete.html
     with open("templates/sync_complete.html", "w") as f:
         f.write('''
