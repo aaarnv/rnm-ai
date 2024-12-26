@@ -3,7 +3,7 @@ import requests
 import sqlite3
 import mimetypes
 import io
-from flask import Flask, request, redirect, session, render_template
+from flask import Flask, request, redirect, session, render_template, jsonify
 from msal import ConfidentialClientApplication
 from PyPDF2 import PdfReader
 import pandas as pd
@@ -13,6 +13,31 @@ from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
 from langchain_community.document_loaders import CSVLoader, PyPDFLoader, UnstructuredExcelLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from square.client import Client
+import json
+from datetime import datetime, timedelta
+
+# App configuration 
+CLIENT_ID = "8c3d5655-72bd-4c68-83a8-5f3ed8e5dd64"
+CLIENT_SECRET = "Jmp8Q~s.Cm5nKx7gOVLnUL~Q9SgyF_c~PekQ8aaV"
+AUTHORITY = "https://login.microsoftonline.com/common"
+REDIRECT_URI = "http://localhost:5001/getAToken"
+SCOPES = ["Files.ReadWrite.All", "User.Read"]
+GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
+OPENAI_API_KEY = "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" 
+SQUARE_APPLICATION_ID = "sq0idp-vXoDPhpQnkrjkmQUK2xlBA"
+SQUARE_APPLICATION_SECRET = "sq0csp-5EGutVtHN2ys2n06V29rjlLvM974fazrvTwiDXaO5sc"
+SQUARE_REDIRECT_URI = "http://localhost:5001/squareauth"
+
+LOCATION_IDS = {
+    'st james': '0SKT76TMJS9GV',
+    'pitt st': 'LJZ754B8QFEVZ',
+    'darlinghurst': 'LFWCQDMP4Y92A',
+    'redfern': 'L60V3VN61S9H9',
+    # 'central kitchen': 'LCQBPXNQHCCQ8',
+    'macquarie park': 'L62J4HVQ7X74M',
+    'mq 2': 'L4TG236P6BFG8'
+}
 
 class IntegratedDocumentChatbot:
     def __init__(self, openai_api_key, db_path="onedrive_files.db"):
@@ -35,6 +60,12 @@ class IntegratedDocumentChatbot:
         # Vector store management
         self.vector_store = None
         self.last_document_count = 0
+
+    def init_square_client(self, access_token):
+        return Client(
+            access_token=access_token,
+            environment='production'  # Change to 'production' for live data
+        )
 
     def load_pdf(self, pdf_file):
         """
@@ -210,56 +241,310 @@ class IntegratedDocumentChatbot:
 
     def answer_question(self, question, chat_history):
         """
-        Answer a question based on loaded documents using OpenAI's ChatCompletion API.
+        Unified method to handle both general and Square-related queries with proper chat history
         """
-        # Update vector store efficiently
-        self.update_vector_store_if_needed()
+        # Simplified Square query detection
+        is_square_query = 'square' in question.lower()
+        
+        try:
+            if is_square_query:
+                # Handle Square queries
+                access_token = session.get('square_access_token')
+                if not access_token:
+                    return "Please connect to Square first to access sales data."
 
-        # Initialize context for the OpenAI ChatCompletion API
-        context = []
-
-        if self.vector_store:
-            # Perform similarity search to find relevant chunks
-            docs = self.vector_store.similarity_search(question, k=5)
-
-            # Validate token limits for retrieved documents
-            docs = self.validate_token_limit(docs, question)
-
-            # Combine document content into a single string
-            document_context = "\n\n".join([doc.page_content for doc in docs])
-
-            # Add the document context to the conversation
-            context.append({
-                "role": "system",
-                "content": f"Relevant information from documents:\n{document_context}"
-            })
-
-        # Combine chat history with the new context
-        full_conversation = context + chat_history + [{"role": "user", "content": question}]
-
-        # Generate response using OpenAI's ChatCompletion API
-        response = self.client.chat.completions.create(
+                client = self.init_square_client(access_token)
+                return self.handle_square_query(question, client, chat_history)
+            else:
+                # Handle general queries using document search
+                self.update_vector_store_if_needed()
+                
+                # Initialize context with relevant documents
+                context = []
+                if self.vector_store:
+                    docs = self.vector_store.similarity_search(question, k=5)
+                    docs = self.validate_token_limit(docs, question)
+                    document_context = "\n\n".join([doc.page_content for doc in docs])
+                    context.append({
+                        "role": "system",
+                        "content": f"Relevant information from documents:\n{document_context}"
+                    })
+                
+                # Combine context, chat history, and current question
+                full_conversation = context + chat_history + [{"role": "user", "content": question}]
+                
+                # Generate response
+                response = self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=full_conversation
+                )
+                
+                return response.choices[0].message.content
+                
+        except Exception as e:
+            print(f"Error processing query: {str(e)}")
+            return f"An error occurred while processing your query: {str(e)}"
+        
+    def handle_square_query(self, question, client, chat_history=None):
+        """
+        Handle Square queries using chat history for context
+        """
+        # Extract date and location information using OpenAI with context from chat history
+        context_messages = [
+            {
+                "role": "system", 
+                "content": """You are a JSON generator that specializes in date and location parsing for Square data queries.
+                Use context from previous messages when available. Return a valid JSON object with this structure:
+                {
+                    "start_date": "YYYY-MM-DD",
+                    "end_date": "YYYY-MM-DD",
+                    "location": "location_name",
+                    "metric": "sales/items",
+                    "item_name": null,
+                    "relative_date": null,
+                    "is_range": false
+                }
+                
+                If a new location or date isn't specified, use the ones from the most recent previous query.
+                If analyzing items, set metric to "items".
+                """
+            }
+        ]
+        
+        # Add chat history for context
+        if chat_history:
+            context_messages.extend(chat_history)
+        
+        # Add current question
+        context_messages.append({"role": "user", "content": question})
+        
+        date_response = self.client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=full_conversation
+            messages=context_messages,
+            temperature=0
         )
+        
+        try:
+            query_params = json.loads(date_response.choices[0].message.content.strip())
+            
+            # Convert location name to ID
+            location_id = None
+            if query_params.get('location'):
+                location_name = query_params['location'].lower()
+                location_id = LOCATION_IDS.get(location_name)
 
-        # Extract the assistant's reply
-        answer = response.choices[0].message.content
+            current_date = datetime.utcnow()
+            
+            # Handle date range parsing
+            if query_params.get('is_range'):
+                start_time = datetime.strptime(query_params['start_date'], '%Y-%m-%d')
+                end_time = datetime.strptime(query_params['end_date'], '%Y-%m-%d')
+                end_time = end_time.replace(hour=23, minute=59, second=59)
+            else:
+                # Single date
+                query_date = datetime.strptime(query_params['start_date'], '%Y-%m-%d')
+                start_time = query_date.replace(hour=0, minute=0, second=0)
+                end_time = query_date.replace(hour=23, minute=59, second=59)
 
-        return answer
+            # Get orders
+            orders = []
+            use_cache = self.should_use_cache(start_time, end_time)
+            
+            if use_cache:
+                cached_orders = self.get_cached_orders(start_time, end_time, location_id)
+                orders.extend(cached_orders)
+
+            if not use_cache or datetime.utcnow().date() == end_time.date():
+                real_time_orders = self.get_real_time_orders(client, start_time, end_time, location_id)
+                orders.extend(real_time_orders)
+
+            if orders:
+                processed_data = self.process_square_orders(
+                    orders, 
+                    query_params.get('metric'),
+                    query_params.get('item_name')
+                )
+                
+                # Generate response using context from chat history
+                date_range_str = f"from {start_time.date()} to {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
+                context = f"Square data analysis for {query_params.get('location', 'all locations')} {date_range_str}:\n{json.dumps(processed_data, indent=2)}"
+                
+                response_messages = [
+                    {"role": "system", "content": "You are a helpful assistant analyzing Square sales data. Provide specific insights and answer the question based on the data provided. When referring to previous context, be explicit about which location and date range you're discussing."},
+                    {"role": "system", "content": context}
+                ]
+                
+                # Add chat history for context in response generation
+                if chat_history:
+                    response_messages.extend(chat_history)
+                
+                response_messages.append({"role": "user", "content": question})
+                
+                response = self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=response_messages
+                )
+                
+                return response.choices[0].message.content
+            else:
+                date_range_str = f"between {start_time.date()} and {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
+                return f"No orders found for {query_params.get('location', 'the specified location')} {date_range_str}"
+
+        except json.JSONDecodeError as e:
+            print("JSON Decode Error:", str(e))
+            return "Error: Invalid response format from date parser"
+        except Exception as e:
+            print("General Error:", str(e))
+            return f"Error processing Square query: {str(e)}"
+        
+        
+    def should_use_cache(self, start_time, end_time):
+        """
+        Determine if we should use cached data based on the query date range
+        """
+        cache_threshold = datetime.now() - timedelta(days=7)
+
+        temp_return = False
+        return temp_return
+
+    def get_cached_orders(self, start_time, end_time, location_id=None):
+        """
+        Retrieve orders from local cache within the specified date range
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        query = """
+            SELECT content 
+            FROM files 
+            WHERE name LIKE 'Square Order%'
+            AND json_extract(content, '$.created_at') BETWEEN ? AND ?
+        """
+        
+        params = [start_time.isoformat(), end_time.isoformat()]
+
+        if location_id:
+            query += " AND json_extract(content, '$.location_id') = ?"
+            params.append(location_id)
+
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        conn.close()
+
+        return [json.loads(row[0]) for row in results]
+
+    def get_real_time_orders(self, client, start_time, end_time, location_id=None):
+        """
+        Fetch real-time orders from Square API, handling pagination to retrieve more than 500 orders.
+        """
+        location_ids = [location_id] if location_id else list(LOCATION_IDS.values())
+        orders = []
+        cursor = None
+
+        while True:
+            body = {
+                'location_ids': location_ids,
+                'query': {
+                    'filter': {
+                        'date_time_filter': {
+                            'created_at': {
+                                'start_at': start_time.isoformat(),
+                                'end_at': end_time.isoformat()
+                            }
+                        }
+                    }
+                },
+                'limit': 500
+            }
+            
+            if cursor:
+                body['cursor'] = cursor
+
+            result = client.orders.search_orders(body=body)
+            
+            if result.is_success():
+                batch_orders = result.body.get('orders', [])
+                orders.extend(batch_orders)
+                cursor = result.body.get('cursor')
+                
+                print(f"Retrieved {len(batch_orders)} orders. Total so far: {len(orders)}")
+
+                # Stop if there are no more pages
+                if not cursor:
+                    break
+            else:
+                raise Exception(f"Square API Error: {result.errors}")
+
+        return orders
+
+
+    def process_square_orders(self, orders, metric_type='sales', item_filter=None):
+        """
+        Process Square orders based on query type and filters
+        Returns data with location names instead of IDs
+        """
+        # Create reverse mapping of location IDs to names
+        location_id_to_name = {id: name.title() for name, id in LOCATION_IDS.items()}
+        
+        results = {
+            'total_sales': 0,
+            'location_breakdown': {},
+            'item_breakdown': {},
+            'order_count': len(orders)
+        }
+        
+        for order in orders:
+            location_id = order.get('location_id')
+            location_name = location_id_to_name.get(location_id, 'Unknown Location')
+            total_money = float(order['total_money']['amount']) / 100
+            
+            # Update location totals using location name instead of ID
+            if location_name not in results['location_breakdown']:
+                results['location_breakdown'][location_name] = {
+                    'total_sales': 0,
+                    'order_count': 0,
+                    'items': {}
+                }
+                
+            results['total_sales'] += total_money
+            results['location_breakdown'][location_name]['total_sales'] += total_money
+            results['location_breakdown'][location_name]['order_count'] += 1
+            
+            # Process line items
+            for item in order.get('line_items', []):
+                item_name = item.get('name', 'Unknown Item')
+                quantity = int(item.get('quantity', 1))
+                item_total = float(item.get('total_money', {}).get('amount', 0)) / 100
+                
+                # Skip if item filter is set and doesn't match
+                if item_filter and item_filter.lower() not in item_name.lower():
+                    continue
+                    
+                if item_name not in results['item_breakdown']:
+                    results['item_breakdown'][item_name] = {
+                        'total_quantity': 0,
+                        'total_sales': 0,
+                        'location_breakdown': {}
+                    }
+                    
+                results['item_breakdown'][item_name]['total_quantity'] += quantity
+                results['item_breakdown'][item_name]['total_sales'] += item_total
+                
+                # Update location-specific item counts using location name
+                if location_name not in results['item_breakdown'][item_name]['location_breakdown']:
+                    results['item_breakdown'][item_name]['location_breakdown'][location_name] = {
+                        'quantity': 0,
+                        'sales': 0
+                    }
+                
+                results['item_breakdown'][item_name]['location_breakdown'][location_name]['quantity'] += quantity
+                results['item_breakdown'][item_name]['location_breakdown'][location_name]['sales'] += item_total
+        
+        return results
 
 # Flask app configuration
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-
-# App configuration (replace these with your own values)
-CLIENT_ID = "8c3d5655-72bd-4c68-83a8-5f3ed8e5dd64"
-CLIENT_SECRET = "Jmp8Q~s.Cm5nKx7gOVLnUL~Q9SgyF_c~PekQ8aaV"
-AUTHORITY = "https://login.microsoftonline.com/common"
-REDIRECT_URI = "http://localhost:5001/getAToken"
-SCOPES = ["Files.ReadWrite.All", "User.Read"]
-GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
-OPENAI_API_KEY = "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" 
 
 # MSAL app instance
 msal_app = ConfidentialClientApplication(
@@ -403,13 +688,12 @@ def search_files():
 
     return render_template("search_results.html", results=results)
 
-# Route: Chatbot interface
 @app.route("/chatbot", methods=["GET", "POST"])
 def chatbot_interface():
     # Initialize chat history in session if not exists
     if 'chat_history' not in session:
         session['chat_history'] = []
-
+    
     if request.method == "POST":
         # Handle file uploads
         if 'pdf' in request.files:
@@ -417,35 +701,39 @@ def chatbot_interface():
             if pdf_file:
                 chatbot.load_pdf(pdf_file)
                 chatbot.update_vector_store_if_needed()
-
-        if 'csv' in request.files:
-            csv_file = request.files['csv']
-            if csv_file:
-                chatbot.load_csv(csv_file)
-                chatbot.update_vector_store_if_needed()
-
-        if 'excel' in request.files:
-            excel_file = request.files['excel']
-            if excel_file:
-                chatbot.load_excel(excel_file)
-                chatbot.update_vector_store_if_needed()
-
+                return "File uploaded successfully"
+        
         # Handle chat question
         question = request.form.get('question')
         if question:
-            # Add user's question to chat history
-            session['chat_history'].append({'role': 'user', 'content': question})
-
+            # Get current chat history
+            chat_history = session.get('chat_history', [])
+            
             # Generate response
-            response = chatbot.answer_question(question# (Previous code continues...)
+            response = chatbot.answer_question(question, chat_history)
+            
+            # Update chat history with the new exchange
+            chat_history.append({"role": "user", "content": question})
+            chat_history.append({"role": "assistant", "content": response})
+            
+            # Trim chat history if it gets too long (keep last 20 exchanges)
+            if len(chat_history) > 40:  # 20 exchanges (40 messages)
+                chat_history = chat_history[-40:]
+            
+            # Save updated history back to session
+            session['chat_history'] = chat_history
+            
+            return render_template(
+            "chatbot.html",
+            chat_history=chat_history,
+            bot_response=response
+        )
 
-            , session['chat_history'])
-
-            # Add assistant's response to chat history
-            session['chat_history'].append({'role': 'assistant', 'content': response})
-
-    return render_template("chatbot.html", 
-                           chat_history=session.get('chat_history', []))
+    # For GET requests, render the template with current chat history
+    return render_template(
+        "chatbot.html",
+        chat_history=session.get('chat_history', [])
+    )
 
 # Manual file upload route
 @app.route("/upload_files", methods=["GET", "POST"])
@@ -476,25 +764,45 @@ def upload_files():
 
     return render_template("upload_files.html")
 
-# Route to clear chat history
+
 @app.route("/clear_chat")
 def clear_chat():
+    """
+    Clear chat history while preserving authentication tokens
+    """
+    # Store authentication tokens
+    ms_token = session.get('access_token')
+    square_token = session.get('square_access_token')
+    
+    # Clear chat history
     session['chat_history'] = []
+    
+    # Restore authentication tokens
+    if ms_token:
+        session['access_token'] = ms_token
+    if square_token:
+        session['square_access_token'] = square_token
+    
     return redirect("/chatbot")
 
 @app.route("/reset_database")
 def reset_database():
     """
-    Reset the OneDrive files database by:
-    1. Closing any existing connections
-    2. Deleting the existing database file
-    3. Reinitializing the database
+    Reset the OneDrive files database while preserving authentication tokens:
+    1. Save existing authentication tokens
+    2. Closing any existing connections
+    3. Deleting the existing database file
+    4. Reinitializing the database
+    5. Restore authentication tokens
     """
-
     # Path to the database file
     db_path = "onedrive_files.db"
 
     try:
+        # Save authentication tokens
+        ms_token = session.get('access_token')
+        square_token = session.get('square_access_token')
+
         # Delete the existing database file if it exists
         if os.path.exists(db_path):
             os.remove(db_path)
@@ -502,20 +810,24 @@ def reset_database():
         # Reinitialize the database
         init_db()
 
-        # Clear manually uploaded documents in the chatbot
+        # Reset chatbot state without affecting authentication
         if 'chatbot' in globals():
             chatbot.manually_uploaded_documents = []
             chatbot.loaded_documents = []
             chatbot.vector_store = None
             chatbot.last_document_count = 0
 
-        # Clear session data if needed
+        # Clear session but preserve authentication tokens
         session.clear()
+        if ms_token:
+            session['access_token'] = ms_token
+        if square_token:
+            session['square_access_token'] = square_token
 
-        return "Database reset successfully. <a href='/dashboard'>Return to Dashboard</a>"
+        return "Database reset successfully. Authentication tokens preserved. <a href='/dashboard'>Return to Dashboard</a>"
     except Exception as e:
         return f"Error resetting database: {str(e)}"
-
+    
 @app.route("/list_files")
 def list_files():
     """
@@ -539,308 +851,147 @@ def list_files():
 
     return render_template("list_files.html", files=files, show_content=show_content)
 
-# Update create_templates() to add list_files.html and update dashboard
-def create_templates():
-    os.makedirs("templates", exist_ok=True)
+@app.route("/connect_square")
+def connect_square():
+    """
+    Initiate Square OAuth flow
+    """
+    auth_url = f"https://connect.squareup.com/oauth2/authorize?client_id={SQUARE_APPLICATION_ID}"
+    auth_url += f"&scope=ORDERS_READ ITEMS_READ MERCHANT_PROFILE_READ"
+    auth_url += f"&redirect_uri={SQUARE_REDIRECT_URI}"
+    return redirect(auth_url)
 
-    # index.html
-    with open("templates/index.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Rebels N Misfits Chatbot</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1 class="text-center mb-4">Rebels N Misfits Chatbot</h1>
-        <div class="text-center">
-            <a href="/login" class="btn btn-primary btn-lg">Login with Microsoft</a>
-        </div>
-    </div>
-</body>
-</html>
-        ''')
+@app.route("/squareauth")
+def square_callback():
+    """
+    Handle Square OAuth callback and token exchange
+    """
+    if 'error' in request.args:
+        return f"Error: {request.args.get('error')}"
 
-    # dashboard.html
-    with open("templates/dashboard.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Welcome, {{ user_name }}!</h1>
-        <div class="row">
-            <div class="col-md-3 mb-3">
-                <a href="/sync_files" class="btn btn-primary w-100">Sync OneDrive Files</a>
-            </div>
-            <div class="col-md-3 mb-3">
-                <a href="/search_files" class="btn btn-secondary w-100">Search Files</a>
-            </div>
-            <div class="col-md-3 mb-3">
-                <a href="/chatbot" class="btn btn-success w-100">Rebels N Misfits Chatbot</a>
-            </div>
-            <div class="col-md-3 mb-3">
-                <a href="/reset_database" class="btn btn-danger w-100" onclick="return confirm('Are you sure you want to reset the database? This will delete all synced and uploaded files.');">Reset Database</a>
-            </div>
-            <div class="col-md-3 mb-3">
-                <a href="/list_files" class="btn btn-info w-100">View Stored Files</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-        ''')
+    code = request.args.get('code')
+    if not code:
+        return "Error: No authorization code received"
 
-    # list_files.html
-    with open("templates/list_files.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Stored Files</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        pre {
-            max-height: 200px;
-            overflow-y: auto;
-        }
-    </style>
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Stored Files</h1>
-        {% if show_content == 'true' %}
-            <table class="table table-striped">
-                <thead>
-                    <tr>
-                        <th>File ID</th>
-                        <th>File Name</th>
-                        <th>Content</th>
-                        <th>Last Modified</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for file in files %}
-                    <tr>
-                        <td>{{ file[0] }}</td>
-                        <td>{{ file[1] }}</td>
-                        <td><pre>{{ file[2][:500] }}{% if file[2]|length > 500 %}... (truncated){% endif %}</pre></td>
-                        <td>{{ file[3] or 'N/A' }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            <a href="/list_files" class="btn btn-secondary">Hide Content</a>
-        {% else %}
-            <table class="table table-striped">
-                <thead>
-                    <tr>
-                        <th>File ID</th>
-                        <th>File Name</th>
-                        <th>Content Length</th>
-                        <th>Last Modified</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for file in files %}
-                    <tr>
-                        <td>{{ file[0] }}</td>
-                        <td>{{ file[1] }}</td>
-                        <td>{{ file[2] }} characters</td>
-                        <td>{{ file[3] or 'N/A' }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            <a href="/list_files?show_content=true" class="btn btn-primary">Show File Contents</a>
-        {% endif %}
-        <a href="/dashboard" class="btn btn-secondary mt-2">Back to Dashboard</a>
-    </div>
-</body>
-</html>
-        ''')
-    # sync_complete.html
-    with open("templates/sync_complete.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Sync Complete</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5 text-center">
-        <h1>Sync Complete!</h1>
-        <p>Successfully synced {{ file_count }} files from OneDrive</p>
-        <a href="/dashboard" class="btn btn-primary">Back to Dashboard</a>
-    </div>
-</body>
-</html>
-        ''')
+    # Exchange authorization code for access token
+    client = Client(
+        environment='production'  # Change to 'production' for live data
+    )
 
-    # search_files.html
-    with open("templates/search_files.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Search Files</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Search Files in OneDrive</h1>
-        <form action="/search_files" method="post">
-            <div class="mb-3">
-                <input type="text" class="form-control" id="query" name="query" placeholder="Enter search term" required>
-            </div>
-            <button type="submit" class="btn btn-primary">Search</button>
-            <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
-        </form>
-    </div>
-</body>
-</html>
-        ''')
+    body = {
+        'client_id': SQUARE_APPLICATION_ID,
+        'client_secret': SQUARE_APPLICATION_SECRET,
+        'code': code,
+        'grant_type': 'authorization_code',
+        'redirect_uri': SQUARE_REDIRECT_URI  # Add this line
+    }
 
-    # search_results.html
-    with open("templates/search_results.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Search Results</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Search Results</h1>
-        {% if results %}
-            <ul class="list-group">
-            {% for name, content in results %}
-                <li class="list-group-item">
-                    <strong>{{ name }}</strong>
-                    <p>{{ content[:300] }}...</p>
-                </li>
-            {% endfor %}
-            </ul>
-        {% else %}
-            <p>No results found.</p>
-        {% endif %}
-        <a href="/dashboard" class="btn btn-primary mt-3">Back to Dashboard</a>
-    </div>
-</body>
-</html>
-        ''')
-
-    # chatbot.html
-    with open("templates/chatbot.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Document Chatbot</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        .chat-container {
-            max-height: 500px;
-            overflow-y: auto;
-        }
-    </style>
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Document Chatbot</h1>
+    response = client.o_auth.obtain_token(body)
+    
+    if response.is_success():
+        # Store the access token in session
+        result = response.body
+        session['square_access_token'] = result['access_token']
         
-        <!-- File Upload Section -->
-        <div class="row mb-3">
-            <div class="col">
-                <a href="/upload_files" class="btn btn-primary">Upload Documents</a>
-                <a href="/clear_chat" class="btn btn-warning">Clear Chat History</a>
-            </div>
-        </div>
+        # Initialize Square client with the new token
+        return redirect('/chatbot')
+    else:
+        return f"Error obtaining token: {response.errors}"
 
-        <!-- Chat History -->
-        <div class="card">
-            <div class="card-body chat-container">
-                {% for message in chat_history %}
-                    {% if message.role == 'user' %}
-                        <div class="alert alert-primary text-end">
-                            <strong>You:</strong> {{ message.content }}
-                        </div>
-                    {% else %}
-                        <div class="alert alert-secondary">
-                            <strong>Assistant:</strong> {{ message.content }}
-                        </div>
-                    {% endif %}
-                {% endfor %}
-            </div>
-        </div>
+# @app.route("/sync_square_data")
+# def sync_square_data():
+#     """
+#     Optional data sync function that caches recent Square data locally.
+#     Useful for reducing API calls and maintaining historical data.
+#     """
+#     access_token = session.get('square_access_token')
+#     if not access_token:
+#         return redirect('/connect_square')
 
-        <!-- Chat Input -->
-        <form action="/chatbot" method="post" class="mt-3">
-            <div class="input-group">
-                <input type="text" class="form-control" name="question" placeholder="Ask a question about your documents" required>
-                <button type="submit" class="btn btn-success">Send</button>
-            </div>
-        </form>
+#     client = Client(access_token=access_token, environment='production')
 
-        <div class="mt-3">
-            <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
-        </div>
-    </div>
-</body>
-</html>
-        ''')
+#     try:
+#         # Sync last 7 days of data instead of 30
+#         end_time = datetime.utcnow()
+#         start_time = end_time - timedelta(days=7)
 
-    # upload_files.html
-    with open("templates/upload_files.html", "w") as f:
-        f.write('''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Upload Files</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <h1>Upload Documents</h1>
-        <form action="/upload_files" method="post" enctype="multipart/form-data">
-            <div class="mb-3">
-                <label for="pdf" class="form-label">Upload PDF</label>
-                <input class="form-control" type="file" id="pdf" name="pdf" accept=".pdf">
-            </div>
-            <div class="mb-3">
-                <label for="csv" class="form-label">Upload CSV</label>
-                <input class="form-control" type="file" id="csv" name="csv" accept=".csv">
-            </div>
-            <div class="mb-3">
-                <label for="excel" class="form-label">Upload Excel</label>
-                <input class="form-control" type="file" id="excel" name="excel" accept=".xlsx,.xls">
-            </div>
-            <button type="submit" class="btn btn-primary">Upload</button>
-            <a href="/chatbot" class="btn btn-secondary">Back to Chatbot</a>
-        </form>
-    </div>
-</body>
-</html>
-        ''')
+#         # Query all locations
+#         body = {
+#             'location_ids': list(LOCATION_IDS.values()),
+#             'query': {
+#                 'filter': {
+#                     'date_time_filter': {
+#                         'created_at': {
+#                             'start_at': start_time.isoformat(),
+#                             'end_at': end_time.isoformat()
+#                         }
+#                     }
+#                 }
+#             }
+#         }
 
-# Create templates
-create_templates()
+#         result = client.orders.search_orders(body=body)
+        
+#         if result.is_success():
+#             orders = result.body.get('orders', [])
+            
+#             conn = sqlite3.connect("onedrive_files.db")
+#             cursor = conn.cursor()
+
+#             # Store orders with more complete data for better context
+#             for order in orders:
+#                 order_id = order['id']
+#                 location_id = order.get('location_id')
+                
+#                 # Get location name from ID
+#                 location_name = next(
+#                     (name for name, id in LOCATION_IDS.items() if id == location_id),
+#                     'unknown location'
+#                 )
+
+#                 # Extract items with more detail
+#                 items_data = []
+#                 for item in order.get('line_items', []):
+#                     item_data = {
+#                         'name': item.get('name', 'Unknown Item'),
+#                         'quantity': int(item.get('quantity', 1)),
+#                         'price': float(item.get('total_money', {}).get('amount', 0)) / 100,
+#                         'modifiers': [mod['name'] for mod in item.get('modifiers', [])]
+#                     }
+#                     items_data.append(item_data)
+
+#                 # Create enriched order summary
+#                 order_summary = {
+#                     'order_id': order_id,
+#                     'location_id': location_id,
+#                     'location_name': location_name,
+#                     'created_at': order.get('created_at'),
+#                     'total_money': float(order['total_money']['amount']) / 100,
+#                     'items': items_data,
+#                     'state': order.get('state'),
+#                     'source': order.get('source', {}).get('name', 'unknown')
+#                 }
+
+#                 cursor.execute("""
+#                     INSERT OR REPLACE INTO files (id, name, content, last_modified)
+#                     VALUES (?, ?, ?, ?)
+#                 """, (
+#                     f"square_order_{order_id}",
+#                     f"Square Order {order_id} - {location_name}",
+#                     json.dumps(order_summary, indent=2),
+#                     order.get('created_at')
+#                 ))
+
+#             conn.commit()
+#             conn.close()
+
+#             return f"Successfully cached {len(orders)} recent orders. <a href='/dashboard'>Return to Dashboard</a>"
+#         else:
+#             return f"Error retrieving orders: {result.errors}"
+
+#     except Exception as e:
+#         return f"Error syncing Square data: {str(e)}"
+
 
 # Main application entry point
 if __name__ == "__main__":
