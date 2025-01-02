@@ -16,6 +16,7 @@ from langchain_community.vectorstores import FAISS
 from square.client import Client
 import json
 from datetime import datetime, timedelta
+import pytz
 
 # App configuration 
 CLIENT_ID = "8c3d5655-72bd-4c68-83a8-5f3ed8e5dd64"
@@ -287,7 +288,7 @@ class IntegratedDocumentChatbot:
         
     def handle_square_query(self, question, client, chat_history=None):
         """
-        Handle Square queries using chat history for context
+        Handle Square queries using chat history for context, with proper timezone handling.
         """
         # Extract date and location information using OpenAI with context from chat history
         context_messages = [
@@ -333,20 +334,22 @@ class IntegratedDocumentChatbot:
                 location_name = query_params['location'].lower()
                 location_id = LOCATION_IDS.get(location_name)
 
-            current_date = datetime.utcnow()
+            # Initialize Sydney timezone
+            sydney_tz = pytz.timezone('Australia/Sydney')
+            current_date = datetime.now(sydney_tz)
             
-            # Handle date range parsing
+            # Handle date range parsing with timezone awareness
             if query_params.get('is_range'):
-                start_time = datetime.strptime(query_params['start_date'], '%Y-%m-%d')
-                end_time = datetime.strptime(query_params['end_date'], '%Y-%m-%d')
+                start_time = sydney_tz.localize(datetime.strptime(query_params['start_date'], '%Y-%m-%d'))
+                end_time = sydney_tz.localize(datetime.strptime(query_params['end_date'], '%Y-%m-%d'))
                 end_time = end_time.replace(hour=23, minute=59, second=59)
             else:
                 # Single date
                 query_date = datetime.strptime(query_params['start_date'], '%Y-%m-%d')
-                start_time = query_date.replace(hour=0, minute=0, second=0)
-                end_time = query_date.replace(hour=23, minute=59, second=59)
+                start_time = sydney_tz.localize(query_date.replace(hour=0, minute=0, second=0))
+                end_time = sydney_tz.localize(query_date.replace(hour=23, minute=59, second=59))
 
-            # Get orders
+            # Rest of the function remains the same...
             orders = []
             use_cache = self.should_use_cache(start_time, end_time)
             
@@ -354,10 +357,11 @@ class IntegratedDocumentChatbot:
                 cached_orders = self.get_cached_orders(start_time, end_time, location_id)
                 orders.extend(cached_orders)
 
-            if not use_cache or datetime.utcnow().date() == end_time.date():
+            if not use_cache or datetime.now(sydney_tz).date() == end_time.date():
                 real_time_orders = self.get_real_time_orders(client, start_time, end_time, location_id)
                 orders.extend(real_time_orders)
 
+            # Process orders and generate response...
             if orders:
                 processed_data = self.process_square_orders(
                     orders, 
@@ -365,7 +369,6 @@ class IntegratedDocumentChatbot:
                     query_params.get('item_name')
                 )
                 
-                # Generate response using context from chat history
                 date_range_str = f"from {start_time.date()} to {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
                 context = f"Square data analysis for {query_params.get('location', 'all locations')} {date_range_str}:\n{json.dumps(processed_data, indent=2)}"
                 
@@ -374,7 +377,6 @@ class IntegratedDocumentChatbot:
                     {"role": "system", "content": context}
                 ]
                 
-                # Add chat history for context in response generation
                 if chat_history:
                     response_messages.extend(chat_history)
                 
@@ -396,7 +398,7 @@ class IntegratedDocumentChatbot:
         except Exception as e:
             print("General Error:", str(e))
             return f"Error processing Square query: {str(e)}"
-        
+            
         
     def should_use_cache(self, start_time, end_time):
         """
@@ -435,11 +437,30 @@ class IntegratedDocumentChatbot:
 
     def get_real_time_orders(self, client, start_time, end_time, location_id=None):
         """
-        Fetch real-time orders from Square API, handling pagination to retrieve more than 500 orders.
+        Fetch real-time orders from Square API, handling pagination and Sydney timezone.
+        
+        Args:
+            client: Square client instance
+            start_time: datetime object in local time
+            end_time: datetime object in local time
+            location_id: Optional specific location ID to query
         """
         location_ids = [location_id] if location_id else list(LOCATION_IDS.values())
         orders = []
         cursor = None
+        
+        # Convert times to Sydney timezone
+        sydney_tz = pytz.timezone('Australia/Sydney')
+        
+        # Ensure input times are aware of timezone
+        if start_time.tzinfo is None:
+            start_time = sydney_tz.localize(start_time)
+        if end_time.tzinfo is None:
+            end_time = sydney_tz.localize(end_time)
+        
+        # Format times in RFC 3339 format with Sydney offset
+        start_time_str = start_time.isoformat()
+        end_time_str = end_time.isoformat()
 
         while True:
             body = {
@@ -448,15 +469,15 @@ class IntegratedDocumentChatbot:
                     'filter': {
                         'date_time_filter': {
                             'created_at': {
-                                'start_at': start_time.isoformat(),
-                                'end_at': end_time.isoformat()
+                                'start_at': start_time_str,
+                                'end_at': end_time_str
                             }
                         }
                     }
                 },
                 'limit': 500
             }
-            
+
             if cursor:
                 body['cursor'] = cursor
 
