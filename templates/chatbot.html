@@ -59,12 +59,13 @@
             background-color: #444654;
             margin-left: auto;
             color: white;
-            border: 1px solid #8afcf6;  /* Added cyan outline for user messages */
+            border: 1px solid #8afcf6;  /* Cyan outline for user messages */
         }
         .bot-message {
             background-color: #343541;
             color: white;
-            border: 1px solid #d0615c;  /* Added red outline for bot messages */
+            border: 1px solid #d0615c;  /* Red outline for bot messages */
+            white-space: pre-line;      /* Preserves line breaks for multi-line text */
         }
         .btn {
             width: 100%;
@@ -79,12 +80,11 @@
             text-align: center;
             box-sizing: border-box;
         }
-        
         #outlook-connect {
-            border: 1px solid #8afcf6;  
+            border: 1px solid #8afcf6;
         }
         #square-connect {
-            border: 1px solid #d0615c; 
+            border: 1px solid #d0615c;
         }
         .btn:hover {
             background-color: #2a2b32;
@@ -115,6 +115,7 @@
         }
         .input-group .form-control {
             flex: 1;
+            padding-right: 50px; /* Make room for the send button */
         }
         .file-upload {
             display: flex;
@@ -128,7 +129,6 @@
             color: white;
             margin: 0 0 20px 0;
         }
-        
         .send-button {
             position: absolute;
             right: 10px;
@@ -153,10 +153,6 @@
             width: 16px;
             height: 16px;
         }
-        .input-group .form-control {
-            padding-right: 50px;
-        }
-
         .loading-indicator {
             display: none;
             position: absolute;
@@ -169,18 +165,15 @@
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
         }
-
         .loading-indicator.visible {
             display: flex;
             align-items: center;
             gap: 8px;
         }
-
         @keyframes bounce {
             0%, 100% { transform: translateY(0); }
             50% { transform: translateY(-5px); }
         }
-
         .loading-dots span {
             display: inline-block;
             width: 4px;
@@ -190,31 +183,29 @@
             margin: 0 2px;
             animation: bounce 0.8s infinite;
         }
-
         .loading-dots span:nth-child(2) {
             animation-delay: 0.2s;
         }
-
         .loading-dots span:nth-child(3) {
             animation-delay: 0.4s;
         }
 
-        .bot-message {
-            background-color: #343541;
+        /* Popup notification styling */
+        .upload-notification {
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: #19c37d; /* green-ish background for success */
             color: white;
-            border: 1px solid #d0615c;
-            white-space: pre-line;  /* This preserves line breaks */
+            padding: 10px 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            font-size: 14px;
+            z-index: 9999;
         }
-        
-        .sales-list {
-            margin: 10px 0;
-            padding-left: 20px;
-        }
-        
-        .sales-item {
-            margin: 5px 0;
-            padding: 5px;
-            border-left: 2px solid #d0615c;
+        .upload-notification.show {
+            display: block;
         }
     </style>
 </head>
@@ -224,12 +215,30 @@
             <h3>Rebels N Misfits</h3>
             <a href="/connect_outlook" class="btn" id="outlook-connect">Connect OneDrive</a>
             <a href="/connect_square" class="btn" id="square-connect">Connect Square</a>
-            <form action="/upload_files" method="post" enctype="multipart/form-data" class="file-upload">
-                <input type="file" name="pdf" class="form-control" accept=".pdf">
-                <input type="file" name="csv" class="form-control" accept=".csv">
-                <input type="file" name="excel" class="form-control" accept=".xlsx,.xls">
+            
+            <!-- Updated file-upload section with labels -->
+            <form 
+                id="upload-form"
+                method="post"
+                enctype="multipart/form-data"
+                class="file-upload"
+                onsubmit="handleFileUpload(event)">
+                
+                <label for="pdfUpload">Upload PDF:</label>
+                <input type="file" id="pdfUpload" name="pdf" class="form-control" accept=".pdf">
+                
+                <label for="csvUpload">Upload CSV:</label>
+                <input type="file" id="csvUpload" name="csv" class="form-control" accept=".csv">
+                
+                <label for="excelUpload">Upload Excel:</label>
+                <input type="file" id="excelUpload" name="excel" class="form-control" accept=".xlsx,.xls">
+
                 <button type="submit" class="btn">Upload Files</button>
             </form>
+
+            <!-- Popup notification for file uploads -->
+            <div class="upload-notification" id="uploadNotification">File has been uploaded</div>
+
             <a href="/clear_chat" class="btn">Clear Chat</a>
         </div>
 
@@ -253,7 +262,13 @@
                     <div class="input-group">
                         <input type="text" class="form-control" name="question" id="question-input" placeholder="Type your message here..." required>
                         <button type="submit" class="send-button">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <svg xmlns="http://www.w3.org/2000/svg"
+                                 viewBox="0 0 24 24"
+                                 fill="none"
+                                 stroke="currentColor"
+                                 stroke-width="2"
+                                 stroke-linecap="round"
+                                 stroke-linejoin="round">
                                 <line x1="22" y1="2" x2="11" y2="13"></line>
                                 <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                             </svg>
@@ -265,6 +280,7 @@
     </div>
 
     <script>
+        /* Handle chat submission */
         const form = document.getElementById('chat-form');
         const input = document.getElementById('question-input');
         const loadingIndicator = document.querySelector('.loading-indicator');
@@ -273,6 +289,7 @@
             e.preventDefault();
             const message = input.value.trim();
             if (message) {
+                // Add user message
                 const userDiv = document.createElement('div');
                 userDiv.className = 'message user-message';
                 userDiv.textContent = message;
@@ -291,12 +308,10 @@
                     });
                     
                     let data = await response.text();
-                    
-                    // Format Square sales data if present
-                    if (data.includes('total sales for each Square location')) {
-                        data = formatSquareSalesData(data);
-                    }
-                    
+
+                    // If you have custom logic to format certain data, do it here:
+                    // Example: if (data.includes('some special phrase')) { ... }
+
                     const botDiv = document.createElement('div');
                     botDiv.className = 'message bot-message';
                     botDiv.textContent = data;
@@ -312,31 +327,73 @@
             }
         }
 
-        function formatSquareSalesData(text) {
-            // Extract sales data using regex
-            const salesMatches = text.match(/([A-Za-z\s]+):\s+\$[\d,.]+/g);
-            
-            if (salesMatches) {
-                // Create formatted output
-                let formattedText = "On December 17th, the total sales for each Square location were:\n\n";
-                salesMatches.forEach(match => {
-                    formattedText += `${match}\n`;
-                });
-                formattedText += "\nIf you need more detailed information or further analysis, feel free to ask!";
-                return formattedText;
-            }
-            
-            return text;
-        }
-
         form.addEventListener('submit', handleSubmit);
-        
         input.addEventListener('keypress', function(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 handleSubmit(e);
             }
         });
+
+
+        /* Handle file uploads (AJAX) and pop-up notification */
+        function handleFileUpload(event) {
+            event.preventDefault();
+
+            // Grab form and files
+            const uploadForm = document.getElementById('upload-form');
+            const pdfFile   = document.getElementById('pdfUpload').files[0];
+            const csvFile   = document.getElementById('csvUpload').files[0];
+            const excelFile = document.getElementById('excelUpload').files[0];
+            
+            // Collect file names for the notification
+            let fileNames = [];
+            if (pdfFile)   fileNames.push(pdfFile.name);
+            if (csvFile)   fileNames.push(csvFile.name);
+            if (excelFile) fileNames.push(excelFile.name);
+            
+            // If no files were chosen, simply return (or alert)
+            if (fileNames.length === 0) {
+                alert("No files selected for upload.");
+                return;
+            }
+
+            // Prepare FormData
+            const formData = new FormData(uploadForm);
+
+            // Perform fetch (AJAX) POST request
+            fetch('/upload_files', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error("Network response was not ok.");
+                }
+                return response.text();
+            })
+            .then(data => {
+                // Display notification with the file names
+                showUploadNotification(fileNames.join(', '));
+                
+                // Optionally, clear the file inputs
+                uploadForm.reset();
+            })
+            .catch(error => {
+                console.error("Upload error:", error);
+            });
+        }
+
+        // Display the bottom-left pop-up for 3 seconds
+        function showUploadNotification(fileName) {
+            const notificationEl = document.getElementById('uploadNotification');
+            notificationEl.textContent = `${fileName} has been uploaded`;
+            notificationEl.classList.add('show');
+            
+            setTimeout(() => {
+                notificationEl.classList.remove('show');
+            }, 3000);
+        }
     </script>
 </body>
 </html>
