@@ -1,58 +1,399 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Document Chatbot</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>Rebels N Misfits Bot</title>
     <style>
-        .chat-container {
-            max-height: 500px;
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+        .sidebar {
+            width: 260px;
+            min-width: 260px;
+            background-color: #202123;
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
             overflow-y: auto;
+        }
+        .content {
+            flex: 1;
+            background-color: #343541;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .input-container {
+            padding: 20px;
+            background-color: #343541;
+            border-top: 1px solid #565869;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .message {
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #444654;
+            margin-left: auto;
+            color: white;
+            border: 1px solid #8afcf6;  /* Cyan outline for user messages */
+        }
+        .bot-message {
+            background-color: #343541;
+            color: white;
+            border: 1px solid #d0615c;  /* Red outline for bot messages */
+            white-space: pre-line;      /* Preserves line breaks for multi-line text */
+        }
+        .btn {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #565869;
+            background-color: transparent;
+            color: white;
+            cursor: pointer;
+            border-radius: 5px;
+            text-decoration: none;
+            display: block;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        #outlook-connect {
+            border: 1px solid #8afcf6;
+        }
+        #square-connect {
+            border: 1px solid #d0615c;
+        }
+        .btn:hover {
+            background-color: #2a2b32;
+        }
+        .btn.connected {
+            background-color: #19c37d;
+            border-color: #19c37d;
+        }
+        .form-control {
+            width: 100%;
+            padding: 10px;
+            margin: 5px 0;
+            border: 1px solid #565869;
+            border-radius: 5px;
+            background-color: #40414f;
+            color: white;
+            box-sizing: border-box;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: #19c37d;
+        }
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            position: relative;
+        }
+        .input-group .form-control {
+            flex: 1;
+            padding-right: 50px; /* Make room for the send button */
+        }
+        .file-upload {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px;
+            border: 1px dashed #565869;
+            border-radius: 5px;
+        }
+        h1, h3 {
+            color: white;
+            margin: 0 0 20px 0;
+        }
+        .send-button {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background-color: #d0615c;
+            border: none;
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+        }
+        .send-button:hover {
+            background-color: #8afcf6;
+        }
+        .send-button svg {
+            width: 16px;
+            height: 16px;
+        }
+        .loading-indicator {
+            display: none;
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #444654;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+        .loading-indicator.visible {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+        .loading-dots span {
+            display: inline-block;
+            width: 4px;
+            height: 4px;
+            background-color: white;
+            border-radius: 50%;
+            margin: 0 2px;
+            animation: bounce 0.8s infinite;
+        }
+        .loading-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .loading-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        /* Popup notification styling */
+        .upload-notification {
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: #19c37d; /* green-ish background for success */
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            font-size: 14px;
+            z-index: 9999;
+        }
+        .upload-notification.show {
+            display: block;
         }
     </style>
 </head>
 <body>
-    <div class="container mt-5">
-        <h1>Document Chatbot</h1>
-        
-        <!-- File Upload Section -->
-        <div class="row mb-3">
-            <div class="col">
-                <a href="/upload_files" class="btn btn-primary">Upload Documents</a>
-                <a href="/clear_chat" class="btn btn-warning">Clear Chat History</a>
-            </div>
+    <div class="container">
+        <div class="sidebar">
+            <h3>Rebels N Misfits</h3>
+            <a href="/connect_outlook" class="btn" id="outlook-connect">Connect OneDrive</a>
+            <a href="/connect_square" class="btn" id="square-connect">Connect Square</a>
+            
+            <!-- Updated file-upload section with labels -->
+            <form 
+                id="upload-form"
+                method="post"
+                enctype="multipart/form-data"
+                class="file-upload"
+                onsubmit="handleFileUpload(event)">
+                
+                <label for="pdfUpload">Upload PDF:</label>
+                <input type="file" id="pdfUpload" name="pdf" class="form-control" accept=".pdf">
+                
+                <label for="csvUpload">Upload CSV:</label>
+                <input type="file" id="csvUpload" name="csv" class="form-control" accept=".csv">
+                
+                <label for="excelUpload">Upload Excel:</label>
+                <input type="file" id="excelUpload" name="excel" class="form-control" accept=".xlsx,.xls">
+
+                <button type="submit" class="btn">Upload Files</button>
+            </form>
+
+            <!-- Popup notification for file uploads -->
+            <div class="upload-notification" id="uploadNotification">File has been uploaded</div>
+
+            <a href="/clear_chat" class="btn">Clear Chat</a>
         </div>
 
-        <!-- Chat History -->
-        <div class="card">
-            <div class="card-body chat-container">
+        <div class="content">
+            <div class="chat-container">
                 {% for message in chat_history %}
-                    {% if message.role == 'user' %}
-                        <div class="alert alert-primary text-end">
-                            <strong>You:</strong> {{ message.content }}
-                        </div>
-                    {% else %}
-                        <div class="alert alert-secondary">
-                            <strong>Assistant:</strong> {{ message.content }}
-                        </div>
-                    {% endif %}
+                    <div class="message {% if message.role == 'user' %}user-message{% else %}bot-message{% endif %}">
+                        {{ message.content }}
+                    </div>
                 {% endfor %}
             </div>
-        </div>
-
-        <!-- Chat Input -->
-        <form action="/chatbot" method="post" class="mt-3">
-            <div class="input-group">
-                <input type="text" class="form-control" name="question" placeholder="Ask a question about your documents" required>
-                <button type="submit" class="btn btn-success">Send</button>
+            <div class="loading-indicator">
+                Thinking<div class="loading-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
             </div>
-        </form>
-
-        <div class="mt-3">
-            <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+            <div class="input-container">
+                <form id="chat-form" action="/chatbot" method="post">
+                    <div class="input-group">
+                        <input type="text" class="form-control" name="question" id="question-input" placeholder="Type your message here..." required>
+                        <button type="submit" class="send-button">
+                            <svg xmlns="http://www.w3.org/2000/svg"
+                                 viewBox="0 0 24 24"
+                                 fill="none"
+                                 stroke="currentColor"
+                                 stroke-width="2"
+                                 stroke-linecap="round"
+                                 stroke-linejoin="round">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
+
+    <script>
+        /* Handle chat submission */
+        const form = document.getElementById('chat-form');
+        const input = document.getElementById('question-input');
+        const loadingIndicator = document.querySelector('.loading-indicator');
+
+        async function handleSubmit(e) {
+            e.preventDefault();
+            const message = input.value.trim();
+            if (message) {
+                // Add user message
+                const userDiv = document.createElement('div');
+                userDiv.className = 'message user-message';
+                userDiv.textContent = message;
+                document.querySelector('.chat-container').appendChild(userDiv);
+                
+                input.value = '';
+                loadingIndicator.classList.add('visible');
+                
+                try {
+                    const response = await fetch('/chatbot', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: `question=${encodeURIComponent(message)}`
+                    });
+                    
+                    let data = await response.text();
+
+                    // If you have custom logic to format certain data, do it here:
+                    // Example: if (data.includes('some special phrase')) { ... }
+
+                    const botDiv = document.createElement('div');
+                    botDiv.className = 'message bot-message';
+                    botDiv.textContent = data;
+                    document.querySelector('.chat-container').appendChild(botDiv);
+                    
+                    const chatContainer = document.querySelector('.chat-container');
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                } catch (error) {
+                    console.error('Error:', error);
+                } finally {
+                    loadingIndicator.classList.remove('visible');
+                }
+            }
+        }
+
+        form.addEventListener('submit', handleSubmit);
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit(e);
+            }
+        });
+
+
+        /* Handle file uploads (AJAX) and pop-up notification */
+        function handleFileUpload(event) {
+            event.preventDefault();
+
+            // Grab form and files
+            const uploadForm = document.getElementById('upload-form');
+            const pdfFile   = document.getElementById('pdfUpload').files[0];
+            const csvFile   = document.getElementById('csvUpload').files[0];
+            const excelFile = document.getElementById('excelUpload').files[0];
+            
+            // Collect file names for the notification
+            let fileNames = [];
+            if (pdfFile)   fileNames.push(pdfFile.name);
+            if (csvFile)   fileNames.push(csvFile.name);
+            if (excelFile) fileNames.push(excelFile.name);
+            
+            // If no files were chosen, simply return (or alert)
+            if (fileNames.length === 0) {
+                alert("No files selected for upload.");
+                return;
+            }
+
+            // Prepare FormData
+            const formData = new FormData(uploadForm);
+
+            // Perform fetch (AJAX) POST request
+            fetch('/upload_files', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error("Network response was not ok.");
+                }
+                return response.text();
+            })
+            .then(data => {
+                // Display notification with the file names
+                showUploadNotification(fileNames.join(', '));
+                
+                // Optionally, clear the file inputs
+                uploadForm.reset();
+            })
+            .catch(error => {
+                console.error("Upload error:", error);
+            });
+        }
+
+        // Display the bottom-left pop-up for 3 seconds
+        function showUploadNotification(fileName) {
+            const notificationEl = document.getElementById('uploadNotification');
+            notificationEl.textContent = `${fileName} has been uploaded`;
+            notificationEl.classList.add('show');
+            
+            setTimeout(() => {
+                notificationEl.classList.remove('show');
+            }, 3000);
+        }
+    </script>
 </body>
 </html>
-        

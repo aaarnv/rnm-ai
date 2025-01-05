@@ -288,14 +288,20 @@ class IntegratedDocumentChatbot:
         
     def handle_square_query(self, question, client, chat_history=None):
         """
-        Handle Square queries using chat history for context, with proper timezone handling.
+        Handle Square queries using chat history for context, with intelligent date handling.
         """
         # Extract date and location information using OpenAI with context from chat history
         context_messages = [
             {
                 "role": "system", 
                 "content": """You are a JSON generator that specializes in date and location parsing for Square data queries.
-                Use context from previous messages when available. Return a valid JSON object with this structure:
+                Analyze the current question AND previous context to determine dates and locations.
+                For dates mentioned without a year:
+                - If the date is in the future for this year, use the previous year
+                - If the date is in the past for this year, use this year
+                Return dates in YYYY-MM-DD format.
+                
+                Return a valid JSON object with this structure:
                 {
                     "start_date": "YYYY-MM-DD",
                     "end_date": "YYYY-MM-DD",
@@ -303,20 +309,38 @@ class IntegratedDocumentChatbot:
                     "metric": "sales/items",
                     "item_name": null,
                     "relative_date": null,
-                    "is_range": false
+                    "is_range": false,
+                    "from_context": {
+                        "date": false,
+                        "location": false
+                    }
                 }
                 
-                If a new location or date isn't specified, use the ones from the most recent previous query.
-                If analyzing items, set metric to "items".
+                Example:
+                If today is January 5, 2025 and user asks about "December 17th":
+                - December 17, 2024 has already passed
+                - Return "2024-12-17" as the date
+                
+                If user asks about "January 20th":
+                - January 20, 2025 is in the future
+                - Return "2024-01-20" as the date
                 """
             }
         ]
         
-        # Add chat history for context
-        if chat_history:
-            context_messages.extend(chat_history)
+        # Add current date info for context
+        current_date = datetime.now(pytz.timezone('Australia/Sydney'))
+        context_messages[0]["content"] += f"\nCurrent date: {current_date.strftime('%Y-%m-%d')}"
         
-        # Add current question
+        # Filter chat history to only include Square-related queries
+        if chat_history:
+            square_context = [
+                msg for msg in chat_history 
+                if 'square' in msg.get('content', '').lower()
+            ]
+            if square_context:
+                context_messages.extend(square_context[-3:])
+        
         context_messages.append({"role": "user", "content": question})
         
         date_response = self.client.chat.completions.create(
@@ -333,21 +357,33 @@ class IntegratedDocumentChatbot:
             if query_params.get('location'):
                 location_name = query_params['location'].lower()
                 location_id = LOCATION_IDS.get(location_name)
-
+            
             # Initialize Sydney timezone
             sydney_tz = pytz.timezone('Australia/Sydney')
             current_date = datetime.now(sydney_tz)
             
-            # Handle date range parsing with timezone awareness
+            # Parse and adjust dates based on current date
             if query_params.get('is_range'):
                 start_time = sydney_tz.localize(datetime.strptime(query_params['start_date'], '%Y-%m-%d'))
                 end_time = sydney_tz.localize(datetime.strptime(query_params['end_date'], '%Y-%m-%d'))
+                
+                # If dates are in future, move them back one year
+                if start_time > current_date:
+                    start_time = start_time.replace(year=start_time.year - 1)
+                if end_time > current_date:
+                    end_time = end_time.replace(year=end_time.year - 1)
+                    
                 end_time = end_time.replace(hour=23, minute=59, second=59)
             else:
-                # Single date
                 query_date = datetime.strptime(query_params['start_date'], '%Y-%m-%d')
-                start_time = sydney_tz.localize(query_date.replace(hour=0, minute=0, second=0))
-                end_time = sydney_tz.localize(query_date.replace(hour=23, minute=59, second=59))
+                query_date = sydney_tz.localize(query_date)
+                
+                # If date is in future, move it back one year
+                if query_date > current_date:
+                    query_date = query_date.replace(year=query_date.year - 1)
+                    
+                start_time = query_date.replace(hour=0, minute=0, second=0)
+                end_time = query_date.replace(hour=23, minute=59, second=59)
 
             # Rest of the function remains the same...
             orders = []
@@ -356,12 +392,11 @@ class IntegratedDocumentChatbot:
             if use_cache:
                 cached_orders = self.get_cached_orders(start_time, end_time, location_id)
                 orders.extend(cached_orders)
-
+            
             if not use_cache or datetime.now(sydney_tz).date() == end_time.date():
                 real_time_orders = self.get_real_time_orders(client, start_time, end_time, location_id)
                 orders.extend(real_time_orders)
-
-            # Process orders and generate response...
+                
             if orders:
                 processed_data = self.process_square_orders(
                     orders, 
@@ -369,17 +404,36 @@ class IntegratedDocumentChatbot:
                     query_params.get('item_name')
                 )
                 
-                date_range_str = f"from {start_time.date()} to {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
-                context = f"Square data analysis for {query_params.get('location', 'all locations')} {date_range_str}:\n{json.dumps(processed_data, indent=2)}"
+                context_info = []
+                if query_params['from_context'].get('date'):
+                    context_info.append("using date from previous query")
+                if query_params['from_context'].get('location'):
+                    context_info.append("using location from previous query")
+                    
+                context_str = f"Analysis for {query_params.get('location', 'all locations')} "
+                if query_params.get('is_range'):
+                    context_str += f"from {start_time.date()} to {end_time.date()}"
+                else:
+                    context_str += f"on {start_time.date()}"
+                    
+                if context_info:
+                    context_str += f" ({', '.join(context_info)})"
+                    
+                context_str += f":\n{json.dumps(processed_data, indent=2)}"
                 
                 response_messages = [
-                    {"role": "system", "content": "You are a helpful assistant analyzing Square sales data. Provide specific insights and answer the question based on the data provided. When referring to previous context, be explicit about which location and date range you're discussing."},
-                    {"role": "system", "content": context}
+                    {
+                        "role": "system", 
+                        "content": "You are a helpful assistant analyzing Square sales data. "
+                                "Provide insights based on the data and maintain continuity with previous questions. "
+                                "When using context from previous queries, acknowledge this naturally in your response."
+                    },
+                    {"role": "system", "content": context_str}
                 ]
                 
                 if chat_history:
-                    response_messages.extend(chat_history)
-                
+                    response_messages.extend(chat_history[-3:])
+                    
                 response_messages.append({"role": "user", "content": question})
                 
                 response = self.client.chat.completions.create(
@@ -389,16 +443,15 @@ class IntegratedDocumentChatbot:
                 
                 return response.choices[0].message.content
             else:
-                date_range_str = f"between {start_time.date()} and {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
-                return f"No orders found for {query_params.get('location', 'the specified location')} {date_range_str}"
-
+                date_str = f"between {start_time.date()} and {end_time.date()}" if query_params.get('is_range') else f"on {start_time.date()}"
+                return f"No orders found for {query_params.get('location', 'the specified location')} {date_str}"
+                
         except json.JSONDecodeError as e:
             print("JSON Decode Error:", str(e))
             return "Error: Invalid response format from date parser"
         except Exception as e:
             print("General Error:", str(e))
             return f"Error processing Square query: {str(e)}"
-            
         
     def should_use_cache(self, start_time, end_time):
         """
@@ -579,7 +632,6 @@ chatbot = IntegratedDocumentChatbot(OPENAI_API_KEY)
 def init_db():
     conn = sqlite3.connect("onedrive_files.db")
     cursor = conn.cursor()
-    # Create a table to store file metadata
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id TEXT PRIMARY KEY,
@@ -593,78 +645,52 @@ def init_db():
 
 init_db()
 
-# Route: Home page
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("chatbot.html", chat_history=session.get('chat_history', []))
 
-# Route: Login and redirect to Microsoft's OAuth flow
-@app.route("/login")
-def login():
+@app.route("/connect_outlook")
+def connect_outlook():
     auth_url = msal_app.get_authorization_request_url(SCOPES, redirect_uri=REDIRECT_URI)
     return redirect(auth_url)
 
-# Route: Handle the redirect from Microsoft OAuth
-@app.route("/getAToken")
-def get_token():
-    code = request.args.get("code")
-    if not code:
-        return "Error: No code provided", 400
-
-    result = msal_app.acquire_token_by_authorization_code(code, SCOPES, redirect_uri=REDIRECT_URI)
-    if "access_token" in result:
-        session["access_token"] = result["access_token"]
-        return redirect("/dashboard")
-    else:
-        return "Error: Could not acquire token", 400
-
-# Route: Dashboard
-@app.route("/dashboard")
-def dashboard():
-    access_token = session.get("access_token")
-    if not access_token:
-        return redirect("/login")
-
-    response = requests.get(f"{GRAPH_API_ENDPOINT}/me", headers={"Authorization": f"Bearer {access_token}"})
-    user_info = response.json()
-
-    return render_template("dashboard.html", user_name=user_info.get("displayName", "User"))
-
-# Route: Sync files from OneDrive to database
-@app.route("/sync_files")
-def sync_files():
-    access_token = session.get("access_token")
-    if not access_token:
-        return redirect("/login")
-
-    response = requests.get(f"{GRAPH_API_ENDPOINT}/me/drive/root/children", headers={"Authorization": f"Bearer {access_token}"})
+def sync_files_from_onedrive(access_token):
+    """Sync files from OneDrive to local database"""
+    response = requests.get(
+        f"{GRAPH_API_ENDPOINT}/me/drive/root/children", 
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+    
+    if response.status_code != 200:
+        raise Exception(f"Failed to fetch files: {response.status_code}")
+        
     files = response.json().get("value", [])
-
+    
     conn = sqlite3.connect("onedrive_files.db")
     cursor = conn.cursor()
-
+    
     for file in files:
         file_id = file["id"]
         file_name = file["name"]
+        last_modified = file.get("lastModifiedDateTime")
+        
         file_content_response = requests.get(
             f"{GRAPH_API_ENDPOINT}/me/drive/items/{file_id}/content",
             headers={"Authorization": f"Bearer {access_token}"}
         )
-
+        
         if file_content_response.status_code == 200:
-            # Detect file type
             mime_type, _ = mimetypes.guess_type(file_name)
             file_content = None
-
+            
             # Handle PDFs
             if mime_type == "application/pdf":
                 pdf_reader = PdfReader(io.BytesIO(file_content_response.content))
                 file_content = "\n".join(page.extract_text() for page in pdf_reader.pages)
-
+            
             # Handle Excel files
             elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
                 try:
-                    # Read all sheets and combine them
                     excel_file = pd.ExcelFile(io.BytesIO(file_content_response.content))
                     all_sheets_content = []
                     
@@ -677,347 +703,96 @@ def sync_files():
                     file_content = "\n".join(all_sheets_content)
                 except Exception as e:
                     file_content = f"Error processing Excel file: {str(e)}"
-
+            
             # Handle other file types as plain text
             else:
                 file_content = file_content_response.text
-
+            
             cursor.execute("""
                 INSERT OR REPLACE INTO files (id, name, content, last_modified)
                 VALUES (?, ?, ?, ?)
-            """, (file_id, file_name, file_content, file.get("lastModifiedDateTime")))
-
+            """, (file_id, file_name, file_content, last_modified))
+    
     conn.commit()
     conn.close()
 
-    return render_template("sync_complete.html", file_count=len(files))
-
-# Route: Search files in database
-@app.route("/search_files", methods=["GET", "POST"])
-def search_files():
-    if request.method == "GET":
-        return render_template("search_files.html")
-
-    query = request.form["query"]
-    conn = sqlite3.connect("onedrive_files.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT name, content FROM files WHERE content LIKE ? OR name LIKE ?
-    """, (f"%{query}%", f"%{query}%"))
-    results = cursor.fetchall()
-    conn.close()
-
-    return render_template("search_results.html", results=results)
-
-@app.route("/chatbot", methods=["GET", "POST"])
-def chatbot_interface():
-    # Initialize chat history in session if not exists
-    if 'chat_history' not in session:
-        session['chat_history'] = []
-    
-    if request.method == "POST":
-        # Handle file uploads
-        if 'pdf' in request.files:
-            pdf_file = request.files['pdf']
-            if pdf_file:
-                chatbot.load_pdf(pdf_file)
-                chatbot.update_vector_store_if_needed()
-                return "File uploaded successfully"
+# Modify the getAToken route to sync immediately after login
+@app.route("/getAToken")
+def get_token():
+    code = request.args.get("code")
+    if not code:
+        return "Error: No code provided", 400
         
-        # Handle chat question
-        question = request.form.get('question')
-        if question:
-            # Get current chat history
-            chat_history = session.get('chat_history', [])
-            
-            # Generate response
-            response = chatbot.answer_question(question, chat_history)
-            
-            # Update chat history with the new exchange
-            chat_history.append({"role": "user", "content": question})
-            chat_history.append({"role": "assistant", "content": response})
-            
-            # Trim chat history if it gets too long (keep last 20 exchanges)
-            if len(chat_history) > 40:  # 20 exchanges (40 messages)
-                chat_history = chat_history[-40:]
-            
-            # Save updated history back to session
-            session['chat_history'] = chat_history
-            
-            return render_template(
-            "chatbot.html",
-            chat_history=chat_history,
-            bot_response=response
-        )
-
-    # For GET requests, render the template with current chat history
-    return render_template(
-        "chatbot.html",
-        chat_history=session.get('chat_history', [])
-    )
-
-# Manual file upload route
-@app.route("/upload_files", methods=["GET", "POST"])
-def upload_files():
-    if request.method == "POST":
-        # Handle PDF upload
-        if 'pdf' in request.files:
-            pdf_file = request.files['pdf']
-            if pdf_file.filename != '':
-                chatbot.load_pdf(pdf_file)
-                chatbot.update_vector_store_if_needed()
-
-        # Handle CSV upload
-        if 'csv' in request.files:
-            csv_file = request.files['csv']
-            if csv_file.filename != '':
-                chatbot.load_csv(csv_file)
-                chatbot.update_vector_store_if_needed()
-
-        # Handle Excel upload
-        if 'excel' in request.files:
-            excel_file = request.files['excel']
-            if excel_file.filename != '':
-                chatbot.load_excel(excel_file)
-                chatbot.update_vector_store_if_needed()
-
-        return redirect("/chatbot")
-
-    return render_template("upload_files.html")
-
-
-@app.route("/clear_chat")
-def clear_chat():
-    """
-    Clear chat history while preserving authentication tokens
-    """
-    # Store authentication tokens
-    ms_token = session.get('access_token')
-    square_token = session.get('square_access_token')
+    result = msal_app.acquire_token_by_authorization_code(code, SCOPES, redirect_uri=REDIRECT_URI)
     
-    # Clear chat history
-    session['chat_history'] = []
+    if "access_token" in result:
+        session["access_token"] = result["access_token"]
+        # Sync files immediately after getting access token
+        try:
+            sync_files_from_onedrive(result["access_token"])
+        except Exception as e:
+            print(f"Sync error: {str(e)}")
     
-    # Restore authentication tokens
-    if ms_token:
-        session['access_token'] = ms_token
-    if square_token:
-        session['square_access_token'] = square_token
-    
-    return redirect("/chatbot")
-
-@app.route("/reset_database")
-def reset_database():
-    """
-    Reset the OneDrive files database while preserving authentication tokens:
-    1. Save existing authentication tokens
-    2. Closing any existing connections
-    3. Deleting the existing database file
-    4. Reinitializing the database
-    5. Restore authentication tokens
-    """
-    # Path to the database file
-    db_path = "onedrive_files.db"
-
-    try:
-        # Save authentication tokens
-        ms_token = session.get('access_token')
-        square_token = session.get('square_access_token')
-
-        # Delete the existing database file if it exists
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-        # Reinitialize the database
-        init_db()
-
-        # Reset chatbot state without affecting authentication
-        if 'chatbot' in globals():
-            chatbot.manually_uploaded_documents = []
-            chatbot.loaded_documents = []
-            chatbot.vector_store = None
-            chatbot.last_document_count = 0
-
-        # Clear session but preserve authentication tokens
-        session.clear()
-        if ms_token:
-            session['access_token'] = ms_token
-        if square_token:
-            session['square_access_token'] = square_token
-
-        return "Database reset successfully. Authentication tokens preserved. <a href='/dashboard'>Return to Dashboard</a>"
-    except Exception as e:
-        return f"Error resetting database: {str(e)}"
-    
-@app.route("/list_files")
-def list_files():
-    """
-    Retrieve and display all files stored in the database
-    """
-    show_content = request.args.get('show_content', 'false')
-    
-    conn = sqlite3.connect("onedrive_files.db")
-    cursor = conn.cursor()
-    
-    if show_content == 'true':
-        # Retrieve all files with full content
-        cursor.execute("SELECT id, name, content, last_modified FROM files")
-    else:
-        # Retrieve files with just metadata
-        cursor.execute("SELECT id, name, length(content) as content_length, last_modified FROM files")
-    
-    files = cursor.fetchall()
-    
-    conn.close()
-
-    return render_template("list_files.html", files=files, show_content=show_content)
+    return redirect("/")
 
 @app.route("/connect_square")
 def connect_square():
-    """
-    Initiate Square OAuth flow
-    """
-    auth_url = f"https://connect.squareup.com/oauth2/authorize?client_id={SQUARE_APPLICATION_ID}"
-    auth_url += f"&scope=ORDERS_READ ITEMS_READ MERCHANT_PROFILE_READ"
-    auth_url += f"&redirect_uri={SQUARE_REDIRECT_URI}"
+    auth_url = f"https://connect.squareup.com/oauth2/authorize?client_id={SQUARE_APPLICATION_ID}&scope=ORDERS_READ ITEMS_READ MERCHANT_PROFILE_READ&redirect_uri={SQUARE_REDIRECT_URI}"
     return redirect(auth_url)
 
 @app.route("/squareauth")
 def square_callback():
-    """
-    Handle Square OAuth callback and token exchange
-    """
-    if 'error' in request.args:
-        return f"Error: {request.args.get('error')}"
-
     code = request.args.get('code')
     if not code:
         return "Error: No authorization code received"
-
-    # Exchange authorization code for access token
-    client = Client(
-        environment='production'  # Change to 'production' for live data
-    )
-
+    client = Client(environment='production')
     body = {
         'client_id': SQUARE_APPLICATION_ID,
         'client_secret': SQUARE_APPLICATION_SECRET,
         'code': code,
         'grant_type': 'authorization_code',
-        'redirect_uri': SQUARE_REDIRECT_URI  # Add this line
+        'redirect_uri': SQUARE_REDIRECT_URI
     }
-
     response = client.o_auth.obtain_token(body)
-    
     if response.is_success():
-        # Store the access token in session
-        result = response.body
-        session['square_access_token'] = result['access_token']
-        
-        # Initialize Square client with the new token
-        return redirect('/chatbot')
-    else:
-        return f"Error obtaining token: {response.errors}"
+        session['square_access_token'] = response.body['access_token']
+    return redirect("/")
 
-# @app.route("/sync_square_data")
-# def sync_square_data():
-#     """
-#     Optional data sync function that caches recent Square data locally.
-#     Useful for reducing API calls and maintaining historical data.
-#     """
-#     access_token = session.get('square_access_token')
-#     if not access_token:
-#         return redirect('/connect_square')
+@app.route("/upload_files", methods=["POST"])
+def upload_files():
+    if 'pdf' in request.files:
+        pdf_file = request.files['pdf']
+        if pdf_file:
+            chatbot.load_pdf(pdf_file)
+    if 'csv' in request.files:
+        csv_file = request.files['csv']
+        if csv_file:
+            chatbot.load_csv(csv_file)
+    if 'excel' in request.files:
+        excel_file = request.files['excel']
+        if excel_file:
+            chatbot.load_excel(excel_file)
+    return redirect("/")
 
-#     client = Client(access_token=access_token, environment='production')
+@app.route("/chatbot", methods=["POST"])
+def chatbot_interface():
+    question = request.form.get('question')
+    if question:
+        chat_history = session.get('chat_history', [])
+        response = chatbot.answer_question(question, chat_history)
+        chat_history.append({"role": "user", "content": question})
+        chat_history.append({"role": "assistant", "content": response})
+        session['chat_history'] = chat_history[-40:]
+        print(response)
+        return response
+    return "No question provided", 400
 
-#     try:
-#         # Sync last 7 days of data instead of 30
-#         end_time = datetime.utcnow()
-#         start_time = end_time - timedelta(days=7)
-
-#         # Query all locations
-#         body = {
-#             'location_ids': list(LOCATION_IDS.values()),
-#             'query': {
-#                 'filter': {
-#                     'date_time_filter': {
-#                         'created_at': {
-#                             'start_at': start_time.isoformat(),
-#                             'end_at': end_time.isoformat()
-#                         }
-#                     }
-#                 }
-#             }
-#         }
-
-#         result = client.orders.search_orders(body=body)
-        
-#         if result.is_success():
-#             orders = result.body.get('orders', [])
-            
-#             conn = sqlite3.connect("onedrive_files.db")
-#             cursor = conn.cursor()
-
-#             # Store orders with more complete data for better context
-#             for order in orders:
-#                 order_id = order['id']
-#                 location_id = order.get('location_id')
-                
-#                 # Get location name from ID
-#                 location_name = next(
-#                     (name for name, id in LOCATION_IDS.items() if id == location_id),
-#                     'unknown location'
-#                 )
-
-#                 # Extract items with more detail
-#                 items_data = []
-#                 for item in order.get('line_items', []):
-#                     item_data = {
-#                         'name': item.get('name', 'Unknown Item'),
-#                         'quantity': int(item.get('quantity', 1)),
-#                         'price': float(item.get('total_money', {}).get('amount', 0)) / 100,
-#                         'modifiers': [mod['name'] for mod in item.get('modifiers', [])]
-#                     }
-#                     items_data.append(item_data)
-
-#                 # Create enriched order summary
-#                 order_summary = {
-#                     'order_id': order_id,
-#                     'location_id': location_id,
-#                     'location_name': location_name,
-#                     'created_at': order.get('created_at'),
-#                     'total_money': float(order['total_money']['amount']) / 100,
-#                     'items': items_data,
-#                     'state': order.get('state'),
-#                     'source': order.get('source', {}).get('name', 'unknown')
-#                 }
-
-#                 cursor.execute("""
-#                     INSERT OR REPLACE INTO files (id, name, content, last_modified)
-#                     VALUES (?, ?, ?, ?)
-#                 """, (
-#                     f"square_order_{order_id}",
-#                     f"Square Order {order_id} - {location_name}",
-#                     json.dumps(order_summary, indent=2),
-#                     order.get('created_at')
-#                 ))
-
-#             conn.commit()
-#             conn.close()
-
-#             return f"Successfully cached {len(orders)} recent orders. <a href='/dashboard'>Return to Dashboard</a>"
-#         else:
-#             return f"Error retrieving orders: {result.errors}"
-
-#     except Exception as e:
-#         return f"Error syncing Square data: {str(e)}"
-
-
-# Main application entry point
-if __name__ == "__main__":
-    # Ensure required directories and files exist
-    os.makedirs("templates", exist_ok=True)
+@app.route("/clear_chat")
+def clear_chat():
+    session['chat_history'] = []
+    return redirect("/")
     
-    # Run the Flask application
+
+if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5001)
+
