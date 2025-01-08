@@ -3,42 +3,39 @@ import requests
 import sqlite3
 import mimetypes
 import io
-from flask import Flask, request, redirect, session, render_template, jsonify
+from flask import Flask, request, redirect, session, render_template
 from msal import ConfidentialClientApplication
 from PyPDF2 import PdfReader
 import pandas as pd
 import tiktoken
 from openai import OpenAI
 from langchain_openai import OpenAIEmbeddings, OpenAI as LangchainOpenAI
-from langchain_community.document_loaders import CSVLoader, PyPDFLoader, UnstructuredExcelLoader
+from langchain_community.document_loaders import CSVLoader, PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from square.client import Client
 import json
 from datetime import datetime, timedelta
 import pytz
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # App configuration 
-CLIENT_ID = "8c3d5655-72bd-4c68-83a8-5f3ed8e5dd64"
-CLIENT_SECRET = "Jmp8Q~s.Cm5nKx7gOVLnUL~Q9SgyF_c~PekQ8aaV"
-AUTHORITY = "https://login.microsoftonline.com/common"
-REDIRECT_URI = "http://localhost:5001/getAToken"
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+AUTHORITY = os.getenv("AUTHORITY")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 SCOPES = ["Files.ReadWrite.All", "User.Read"]
-GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
-OPENAI_API_KEY = "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" 
-SQUARE_APPLICATION_ID = "sq0idp-vXoDPhpQnkrjkmQUK2xlBA"
-SQUARE_APPLICATION_SECRET = "sq0csp-5EGutVtHN2ys2n06V29rjlLvM974fazrvTwiDXaO5sc"
-SQUARE_REDIRECT_URI = "http://localhost:5001/squareauth"
+GRAPH_API_ENDPOINT = os.getenv("GRAPH_API_ENDPOINT")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SQUARE_APPLICATION_ID = os.getenv("SQUARE_APPLICATION_ID")
+SQUARE_APPLICATION_SECRET = os.getenv("SQUARE_APPLICATION_SECRET")
+SQUARE_REDIRECT_URI = os.getenv("SQUARE_REDIRECT_URI")
 
-LOCATION_IDS = {
-    'st james': '0SKT76TMJS9GV',
-    'pitt st': 'LJZ754B8QFEVZ',
-    'darlinghurst': 'LFWCQDMP4Y92A',
-    'redfern': 'L60V3VN61S9H9',
-    # 'central kitchen': 'LCQBPXNQHCCQ8',
-    'macquarie park': 'L62J4HVQ7X74M',
-    'mq 2': 'L4TG236P6BFG8'
-}
+location_ids_str = os.getenv("LOCATION_IDS", '{}')
+LOCATION_IDS = json.loads(location_ids_str)
 
 class IntegratedDocumentChatbot:
     def __init__(self, openai_api_key, db_path="onedrive_files.db"):
@@ -792,7 +789,6 @@ def clear_chat():
     session['chat_history'] = []
     return redirect("/")
     
-
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5001)
 
