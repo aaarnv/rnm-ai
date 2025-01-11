@@ -4,7 +4,274 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rebels N Misfits Bot</title>
-    <link rel="stylesheet" href="/templates/index.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+        .sidebar {
+            flex: 1;
+            min-width: 260px;
+            background-color: #202123;
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+        }
+        .content {
+            flex: 7;
+            background-color: #343541;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+        .chat-container {
+            flex: 15;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .input-container {
+            flex: 1;
+            padding: 20px;
+            background-color: #343541;
+            border-top: 1px solid #565869;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .message {
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #444654;
+            margin-left: auto;
+            color: white;
+            border: 1px solid #8afcf6;  /* Cyan outline for user messages */
+        }
+        .bot-message {
+            background-color: #343541;
+            color: white;
+            border: 1px solid #d0615c;  /* Red outline for bot messages */
+            white-space: pre-line;      /* Preserves line breaks for multi-line text */
+        }
+        .btn {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #565869;
+            background-color: transparent;
+            color: white;
+            cursor: pointer;
+            border-radius: 5px;
+            text-decoration: none;
+            display: block;
+            text-align: center;
+            box-sizing: border-box;
+        }
+        #outlook-connect {
+            border: 1px solid #8afcf6;
+        }
+        #square-connect {
+            border: 1px solid #d0615c;
+        }
+        .btn:hover {
+            background-color: #2a2b32;
+        }
+        .btn.connected {
+            background-color: #19c37d;
+            border-color: #19c37d;
+        }
+        .form-control {
+            width: 100%;
+            padding: 10px;
+            margin: 5px 0;
+            border: 1px solid #565869;
+            border-radius: 5px;
+            background-color: #40414f;
+            color: white;
+            box-sizing: border-box;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: #19c37d;
+        }
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            position: relative;
+        }
+        .input-group .form-control {
+            flex: 1;
+            padding-right: 50px; /* Make room for the send button */
+        }
+        .file-upload {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px;
+            border: 1px dashed #565869;
+            border-radius: 5px;
+        }
+        h1, h3 {
+            color: white;
+            margin: 0 0 20px 0;
+        }
+        .send-button {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background-color: #d0615c;
+            border: none;
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+        }
+        .send-button:hover {
+            background-color: #8afcf6;
+        }
+        .send-button svg {
+            width: 16px;
+            height: 16px;
+        }
+        .loading-indicator {
+            display: none;
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #444654;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+        .loading-indicator.visible {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+        .loading-dots span {
+            display: inline-block;
+            width: 4px;
+            height: 4px;
+            background-color: white;
+            border-radius: 50%;
+            margin: 0 2px;
+            animation: bounce 0.8s infinite;
+        }
+        .loading-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .loading-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        /* Popup notification styling */
+        .upload-notification {
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: #19c37d; 
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            font-size: 14px;
+            z-index: 9999;
+        }
+        .upload-notification.show {
+            display: block;
+        }
+        .toggle-button {
+            display: none;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+        }
+        th, td {
+            border: 1px solid #565869;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #444654;
+            color: white;
+        }
+        td {
+            background-color: #343541;
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .toggle-button {
+                display: initial;
+            }
+            .chat-container {
+                flex: 12.5;
+            }
+            .input-container {
+                flex: 1;
+            }
+            .sidebar {
+                position: fixed;
+                left: -100%; 
+                top: 0;
+                bottom: 0;
+                width: 260px;
+                transition: left 0.3s ease;
+                z-index: 1000;
+            }
+            .sidebar.visible {
+                left: 0; 
+            }
+            .content {
+                margin-left: 0;
+            }
+            .toggle-button {
+                position: fixed;
+                top: 10px;
+                left: 10px;
+                background-color: #343541;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                cursor: pointer;
+                z-index: 1100;
+            }
+        }
+
+    </style>
 </head>
 <body>
     <button class="toggle-button" onclick="toggleSidebar()">☰</button>
